@@ -516,8 +516,6 @@ App::App() : proxy(new ItemProxy) {
 
     view = new QTableView;
     view->setModel(proxy);
-    view->setSortingEnabled(true);
-    view->sortByColumn(StatusModel::Status, Qt::DescendingOrder);  // Nagstamon default sort
     view->setSelectionBehavior(QAbstractItemView::SelectRows);
     view->setSelectionMode(QAbstractItemView::ExtendedSelection);
     view->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -539,6 +537,18 @@ App::App() : proxy(new ItemProxy) {
         {StatusModel::Attempt, "Attempt"}};
     for (auto [col, sample] : widths) view->setColumnWidth(col, fm.horizontalAdvance(sample) + 24);
     if (!cfg.headerState.isEmpty()) hh->restoreState(cfg.headerState);
+    // header clicks cycle ascending -> descending -> default. Default (at start) is the model's own
+    // order: worst state first, then host, service (Nagstamon's default "status descending").
+    hh->setSectionsClickable(true);
+    hh->setSortIndicatorShown(true);
+    hh->setSortIndicator(-1, Qt::AscendingOrder);  // -1 = no column sorted, no arrow
+    connect(hh, &QHeaderView::sectionClicked, this, [this, hh](int col) {
+        int cur = proxy->sortColumn();
+        if (cur != col) proxy->sort(col, Qt::AscendingOrder);
+        else if (proxy->sortOrder() == Qt::AscendingOrder) proxy->sort(col, Qt::DescendingOrder);
+        else proxy->sort(-1);  // back to the default order
+        hh->setSortIndicator(proxy->sortColumn(), proxy->sortOrder());
+    });
     proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     proxy->setFilterKeyColumn(-1);  // any column
     connect(search, &QLineEdit::textChanged, this, [this](const QString &t) {
