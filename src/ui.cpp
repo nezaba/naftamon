@@ -1,8 +1,6 @@
 #include "ui.h"
 #include <QApplication>
-#include <QAudioOutput>
 #include <QBoxLayout>
-#include <QBuffer>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
@@ -21,7 +19,6 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
-#include <QMediaPlayer>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -34,6 +31,7 @@
 #include <QRadioButton>
 #include <QScreen>
 #include <QSettings>
+#include <QSoundEffect>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
 #include <QSpinBox>
@@ -814,10 +812,6 @@ App::App() : proxy(new ItemProxy) {
         if (r == QSystemTrayIcon::Trigger) toggleWindow();
     });
 
-    player = new QMediaPlayer(this);
-    audio = new QAudioOutput(this);
-    player->setAudioOutput(audio);
-    soundBuf = new QBuffer(this);
 
     connect(&pollTimer, &QTimer::timeout, this, [this] { for (auto *s : servers) s->refresh(); });
     tickTimer.start(1000);
@@ -1072,17 +1066,22 @@ void App::stopNotifying() {
 
 void App::playSound(State s) {
     if (std::find(std::begin(SOUND_STATES), std::end(SOUND_STATES), s) == std::end(SOUND_STATES)) return;
-    player->stop();
-    player->setSource(QUrl());
-    if (!cfg.customSound[s].isEmpty()) {
-        player->setSource(QUrl::fromLocalFile(cfg.customSound[s]));
-    } else {
-        soundBuf->close();
-        soundBuf->setData(toneWav(s));
-        soundBuf->open(QIODevice::ReadOnly);
-        player->setSourceDevice(soundBuf, QUrl("tone.wav"));
+    // QSoundEffect plays a WAV straight to the audio server. QMediaPlayer (used before) builds a
+    // full media pipeline; on Qt 6.2 / GStreamer that loaded OpenBLAS, camera and GPU plugins and was
+    // seen using 99% CPU. Created on first use only, so no audio code runs while sound is off.
+    QString file = cfg.customSound[s];
+    if (file.isEmpty()) {  // built-in tone, written once to the cache dir (QSoundEffect needs a file)
+        file = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/tone-" + lower(s) + ".wav";
+        QByteArray wav = toneWav(s);
+        if (QFileInfo(file).size() != wav.size()) {
+            QDir().mkpath(QFileInfo(file).absolutePath());
+            QFile f(file);
+            if (f.open(QIODevice::WriteOnly)) f.write(wav);
+        }
     }
-    player->play();
+    if (!effect) effect = new QSoundEffect(this);
+    if (effect->source() != QUrl::fromLocalFile(file)) effect->setSource(QUrl::fromLocalFile(file));
+    effect->play();
 }
 
 // Number on the icon: only serious problems (CRITICAL services, DOWN/UNREACHABLE hosts);
@@ -1721,7 +1720,7 @@ void App::settingsDialog() {
     for (State s : SEVERITY_DESC) ifs->addWidget(check(stateName(s), tmp.notifyIf[s]));
     nf->addRow("Notify on:", ifs);
     for (State s : SOUND_STATES)
-        nf->addRow("Custom sound " + stateName(s) + ":", text(tmp.customSound[s], "empty = built-in tone"));
+        nf->addRow("Custom sound " + stateName(s) + ":", text(tmp.customSound[s], "WAV file, empty = built-in tone"));
     nf->addRow(check("Run notification actions", tmp.actions));
     for (State s : {WARNING, CRITICAL, DOWN, UP})
         nf->addRow("Action " + (s == UP ? QString("OK") : stateName(s)) + ":", text(tmp.action[s], "shell command"));

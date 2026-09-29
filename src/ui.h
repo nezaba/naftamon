@@ -10,9 +10,7 @@
 
 class QLabel;
 class QTableView;
-class QMediaPlayer;
-class QAudioOutput;
-class QBuffer;
+class QSoundEffect;
 class QLineEdit;
 class QToolButton;
 class QFrame;
@@ -36,7 +34,7 @@ struct AppConfig {
     Filters filters;
     bool notify = true, flash = true, sound = true, soundRepeat = false, desktop = false;
     bool notifyIf[STATE_COUNT] = {false, true, true, true, true, true};
-    QString customSound[STATE_COUNT];  // used for WARNING, CRITICAL, DOWN; empty = built-in tone
+    QString customSound[STATE_COUNT];  // WAV files for WARNING, CRITICAL, DOWN; empty = built-in tone
     bool actions = false;
     QString action[STATE_COUNT];       // shell command per state, UP = the "OK" action
     // last used values of the command dialogs
@@ -147,9 +145,7 @@ private:
     QTimer bannerTimer;
     QToolButton *chips[STATE_COUNT] = {};
     QSystemTrayIcon tray;
-    QMediaPlayer *player;
-    QAudioOutput *audio;
-    QBuffer *soundBuf;
+    QSoundEffect *effect = nullptr;  // created on the first sound
     // notification state (Nagstamon statuswindow_properties)
     bool notifying = false;
     State worstNotified = UP;
