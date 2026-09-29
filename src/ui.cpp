@@ -1385,6 +1385,7 @@ static QDialogButtonBox *okCancel(QDialog *d) {
 void App::acknowledgeDialog(const QVector<Item> &items) {
     if (items.isEmpty()) return;
     QDialog d(window);
+    d.setMinimumWidth(520);  // room for wrapped hints and long host names
     d.setWindowTitle("Acknowledge");
     auto *f = new QFormLayout(&d);
     f->addRow("Targets:", new QLabel(targetsText(items)));
@@ -1447,6 +1448,7 @@ void App::downtimeDialog(const QVector<Item> &items) {
     // start/end times come from the server's own form (its timezone), like Nagstamon get_start_end()
     srv->fetchForm(items[0], items[0].isHost() ? 55 : 56, [this, items](CmdForm form) {
         QDialog d(window);
+        d.setMinimumWidth(520);
         d.setWindowTitle("Downtime");
         auto *f = new QFormLayout(&d);
         f->addRow("Targets:", new QLabel(targetsText(items)));
@@ -1475,6 +1477,7 @@ void App::downtimeDialog(const QVector<Item> &items) {
         auto *startLabel = new QLabel, *endLabel = new QLabel, *durLabel = new QLabel("Duration:"), *hint = new QLabel;
         hint->setWordWrap(true);
         hint->setForegroundRole(QPalette::PlaceholderText);
+        hint->setMinimumHeight(hint->fontMetrics().lineSpacing() * 2 + 4);  // both texts fit, no resize on switch
         f->addRow(startLabel, start);
         f->addRow(endLabel, end);
         f->addRow(durLabel, dur);
@@ -1509,6 +1512,7 @@ void App::downtimeDialog(const QVector<Item> &items) {
 
 void App::submitDialog(const Item &item) {
     QDialog d(window);
+    d.setMinimumWidth(520);
     d.setWindowTitle("Submit check result");
     auto *f = new QFormLayout(&d);
     f->addRow("Target:", new QLabel(targetsText({item})));
@@ -1528,6 +1532,7 @@ void App::submitDialog(const Item &item) {
 // taken: names of the other servers (a name identifies a server, so it must be unique)
 bool App::editServer(ServerConf &s, const QStringList &taken, const QString &title) {
     QDialog d(window);
+    d.setMinimumWidth(520);
     d.setWindowTitle(title);
     auto *f = new QFormLayout(&d);
     auto *name = new QLineEdit(s.name);
