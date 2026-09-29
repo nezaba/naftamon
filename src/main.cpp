@@ -11,6 +11,13 @@ int main(int argc, char **argv) {
     app.setDesktopFileName("naftamon");
     app.setQuitOnLastWindowClosed(false);  // lives in the tray / status bar
     app.setWindowIcon(QIcon(appIconPixmap(256)));
+    // Some themes (seen on Ubuntu with a dark style) ship a black placeholder color on dark fields:
+    // derive it from the theme's text color instead, so hints stay readable on light and dark themes.
+    QPalette pal = app.palette();
+    QColor hint = pal.color(QPalette::Text);
+    hint.setAlphaF(0.6);
+    pal.setColor(QPalette::PlaceholderText, hint);
+    app.setPalette(pal);
 
     // naftamon --export-icon FILE.png [SIZE]: used by install.sh for the desktop entry
     QStringList args = app.arguments();
@@ -22,7 +29,7 @@ int main(int argc, char **argv) {
     QLockFile lock(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) + "/naftamon-" + id + ".lock");
     lock.setStaleLockTime(0);  // held for the whole run; a crashed owner is detected by its PID
     if (!lock.tryLock()) {
-        std::fprintf(stderr, "naftamon is already running (see: pgrep -a naftamon)\n");
+        std::fprintf(stderr, "Naftamon is already running (see: pgrep -a naftamon)\n");
         return 1;
     }
     App a;

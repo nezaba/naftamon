@@ -2,17 +2,19 @@
 #include "core.h"
 #include "thruk.h"
 #include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
 #include <QSystemTrayIcon>
+#include <QDateTime>
 #include <QTimer>
 #include <QWidget>
 
 class QLabel;
 class QTableView;
-class QSortFilterProxyModel;
 class QMediaPlayer;
 class QAudioOutput;
 class QBuffer;
 class QLineEdit;
+class QToolButton;
 
 QColor stateBg(State s);
 QColor stateFg(State s);
@@ -41,7 +43,7 @@ struct AppConfig {
     bool ackExpire = false;  // Nagstamon defaults_acknowledge_expire*
     int ackExpireHours = 2, ackExpireMinutes = 0;
     bool highlightNew = true;  // Nagstamon highlight_new_events
-    bool startMaximized = true;
+    bool showAtStart = true;
     int closeAction = 0;       // CloseAsk / CloseMinimize / CloseQuit
     QVector<CustomAction> customActions{{"SSH", "ssh $HOST$", true}};
     QString ackComment = "acknowledged", dtComment = "scheduled downtime";
@@ -68,6 +70,26 @@ public:
     int columnCount(const QModelIndex &) const override { return COLS; }
     QVariant data(const QModelIndex &idx, int role) const override;
     QVariant headerData(int section, Qt::Orientation o, int role) const override;
+};
+
+// sorting + search, plus the "New only" toggle
+class ItemProxy : public QSortFilterProxyModel {
+public:
+    const StatusModel *m = nullptr;
+    bool newOnly = false;
+    void refilter() {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+        beginFilterChange();
+        endFilterChange(Direction::Rows);
+#else
+        invalidateFilter();  // Qt < 6.9 (e.g. Ubuntu 22.04)
+#endif
+    }
+protected:
+    bool filterAcceptsRow(int row, const QModelIndex &parent) const override {
+        if (newOnly && !m->fresh.contains(m->items[row].key())) return false;
+        return QSortFilterProxyModel::filterAcceptsRow(row, parent);
+    }
 };
 
 class StatusBar : public QWidget {
@@ -104,7 +126,8 @@ private:
     QVector<ThrukServer *> servers;
     QTimer pollTimer, tickTimer;
     StatusModel model;
-    QSortFilterProxyModel *proxy;
+    ItemProxy *proxy;
+    QToolButton *showAck, *showDowntime, *showFlapping, *newOnly;  // quick filters next to search
     StatusBar *bar;
     QWidget *window;
     QTableView *view;
@@ -121,10 +144,12 @@ private:
     QHash<QString, QSet<QString>> previousKeys;  // per server name
     QHash<QString, State> previousWorst;
     QString lastError;
-    QHash<QString, bool> eventHistory;  // item key + state -> still fresh (unseen)
+    qint64 seenSince = QDateTime::currentSecsSinceEpoch();  // state changes after this are "new"
 
     void applyConfig();
-    void rebuild(ThrukServer *updated);
+    // quiet: re-filter without notifying or marking newly visible rows as new (filter changes)
+    void rebuild(ThrukServer *updated, bool quiet = false);
+    void syncToggles();
     void notifyChange(State diff, State serverWorst, State serverPrevWorst);
     void stopNotifying();
     void playSound(State s);

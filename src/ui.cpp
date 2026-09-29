@@ -30,6 +30,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScreen>
 #include <QSettings>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
@@ -105,7 +106,7 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
         {"downtime_fixed", &c.dtFixed},
         {"ack_expire", &c.ackExpire},
         {"highlight_new_events", &c.highlightNew},
-        {"start_maximized", &c.startMaximized},
+        {"show_window_at_start", &c.showAtStart},
     };
 }
 
@@ -290,7 +291,7 @@ QVariant StatusModel::headerData(int section, Qt::Orientation o, int role) const
 
 StatusBar::StatusBar() {
     setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    setWindowTitle("naftamon");
+    setWindowTitle("Naftamon");
     auto *l = new QHBoxLayout(this);
     l->setContentsMargins(0, 0, 0, 0);
     l->setSpacing(0);
@@ -445,13 +446,15 @@ static QByteArray toneWav(State s) {
 
 // ---------------------------------------------------------------- app
 
-App::App() : proxy(new QSortFilterProxyModel(this)) {
+App::App() : proxy(new ItemProxy) {
+    proxy->setParent(this);
+    proxy->m = &model;
     cfg.load();
     proxy->setSourceModel(&model);
     proxy->setSortRole(Qt::UserRole);
 
     window = new QWidget;
-    window->setWindowTitle("naftamon");
+    window->setWindowTitle("Naftamon");
     auto *v = new QVBoxLayout(window);
     v->setContentsMargins(6, 6, 6, 4);
     v->setSpacing(4);
@@ -466,6 +469,37 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
     if (!findIcon.isNull()) search->addAction(findIcon, QLineEdit::LeadingPosition);
     search->setFixedWidth(search->fontMetrics().horizontalAdvance('x') * 32);
     top->addWidget(search);
+    top->addSpacing(8);
+    // quick filters, also the legend of the row flags; A/D/F are the Settings → Filters switches
+    auto toggle = [&](const QString &text) {
+        auto *b = new QToolButton;
+        b->setText(text);
+        b->setCheckable(true);
+        b->setAutoRaise(true);
+        top->addWidget(b);
+        return b;
+    };
+    showAck = toggle("A  Acknowledged");
+    showDowntime = toggle("D  Downtime");
+    showFlapping = toggle("F  Flapping");
+    newOnly = toggle("N  New only");
+    newOnly->setToolTip("Show only new problems (bold, flag N) — not seen since the window was last closed");
+    auto filterToggle = [this](QToolButton *b, std::function<void(bool)> setHidden) {
+        connect(b, &QToolButton::clicked, this, [this, setHidden](bool shown) {
+            setHidden(!shown);
+            cfg.save();
+            syncToggles();
+            rebuild(nullptr, true);
+        });
+    };
+    filterToggle(showAck, [this](bool h) { cfg.filters.acknowledged = h; });
+    filterToggle(showDowntime, [this](bool h) { cfg.filters.downtime = h; });
+    filterToggle(showFlapping, [this](bool h) { cfg.filters.allFlappingHosts = cfg.filters.allFlappingServices = h; });
+    connect(newOnly, &QToolButton::toggled, this, [this](bool on) {
+        proxy->newOnly = on;
+        proxy->refilter();
+        updateEmptyHint();
+    });
     top->addStretch();
     auto tool = [&](const char *icon, const QString &text, const QString &tip) {
         auto *b = new QToolButton;
@@ -529,7 +563,11 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
     QFont small = serverLine->font();
     small.setPointSizeF(small.pointSizeF() * 0.9);
     serverLine->setFont(small);
-    serverLine->setForegroundRole(QPalette::PlaceholderText);
+    QPalette sp = serverLine->palette();  // muted, but derived from the theme's text color
+    QColor muted = sp.color(QPalette::WindowText);
+    muted.setAlphaF(0.7);
+    sp.setColor(QPalette::WindowText, muted);
+    serverLine->setPalette(sp);
     v->addWidget(serverLine);
 
     auto *find = new QShortcut(QKeySequence::Find, window);
@@ -538,8 +576,12 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
     clear->setContext(Qt::WidgetShortcut);
     connect(clear, &QShortcut::activated, search, &QLineEdit::clear);
     window->installEventFilter(this);
-    window->resize(1100, 450);
+    // first start: ~60% of the screen, centered; later: the remembered size/position, never maximized
+    QRect avail = window->screen()->availableGeometry();
+    window->resize(avail.width() * 6 / 10, avail.height() * 6 / 10);
+    window->move(avail.center() - window->rect().center());
     if (!cfg.windowGeometry.isEmpty()) window->restoreGeometry(cfg.windowGeometry);
+    window->setWindowState(Qt::WindowNoState);
 
     connect(refreshBtn, &QToolButton::clicked, this, [this] { for (auto *s : servers) s->refresh(); });
     connect(recheckAllBtn, &QToolButton::clicked, this, [this] { recheck(model.items); });
@@ -592,8 +634,8 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
             window->show();
             QTimer::singleShot(300, this, [this, shot] { window->grab().save(shot); quit(); });
         });
-    else if (cfg.startMaximized)
-        window->showMaximized();
+    else if (cfg.showAtStart)
+        window->show();
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { quitting = true; });
 }
 
@@ -606,9 +648,9 @@ void App::quit() {
 bool App::confirmClose() {
     int choice = cfg.closeAction;
     if (choice == CloseAsk) {
-        QMessageBox box(QMessageBox::Question, "naftamon", "Close naftamon or keep it running?",
+        QMessageBox box(QMessageBox::Question, "Naftamon", "Close Naftamon or keep it running?",
                         QMessageBox::NoButton, window);
-        box.setInformativeText("Minimized, naftamon keeps monitoring in the system tray.");
+        box.setInformativeText("Minimized, Naftamon keeps monitoring in the system tray.");
         auto *min = box.addButton("Minimize to tray", QMessageBox::AcceptRole);
         auto *quitBtn = box.addButton("Quit", QMessageBox::DestructiveRole);
         box.addButton(QMessageBox::Cancel);
@@ -669,7 +711,7 @@ void App::applyConfig() {
         connect(s, &ThrukServer::recheckingChanged, this, [this] { rebuild(nullptr); });
         connect(s, &ThrukServer::commandFailed, this, [this](const QString &msg) {
             lastError = msg;
-            tray.showMessage("naftamon: command failed", msg, QSystemTrayIcon::Warning);
+            tray.showMessage("Naftamon: command failed", msg, QSystemTrayIcon::Warning);
             rebuild(nullptr);
         });
         servers.append(s);
@@ -687,7 +729,25 @@ void App::applyConfig() {
     }
     tray.show();
     if (!cfg.floatingBar && !QSystemTrayIcon::isSystemTrayAvailable()) window->show();
-    rebuild(nullptr);
+    syncToggles();
+    rebuild(nullptr, true);  // filters may have changed: re-filter quietly
+}
+
+// pressed = shown; hidden kinds get a struck-through label
+void App::syncToggles() {
+    const Filters &f = cfg.filters;
+    const std::tuple<QToolButton *, bool, const char *> t[] = {
+        {showAck, f.acknowledged, "acknowledged problems"},
+        {showDowntime, f.downtime, "problems in downtime"},
+        {showFlapping, f.allFlappingHosts && f.allFlappingServices, "flapping problems"}};
+    for (auto [b, hidden, what] : t) {
+        b->setChecked(!hidden);
+        QFont font = b->font();
+        font.setStrikeOut(hidden);
+        b->setFont(font);
+        b->setToolTip(QString(hidden ? "Hiding %1 — click to show them" : "Showing %1 — click to hide them") .arg(what) +
+                      " (same as Settings → Filters)");
+    }
 }
 
 ThrukServer *App::serverOf(const Item &i) const {
@@ -696,7 +756,7 @@ ThrukServer *App::serverOf(const Item &i) const {
     return nullptr;
 }
 
-void App::rebuild(ThrukServer *updated) {
+void App::rebuild(ThrukServer *updated, bool quiet) {
     qint64 now = QDateTime::currentSecsSinceEpoch();
     QVector<Item> all;
     int counts[STATE_COUNT] = {};
@@ -713,6 +773,9 @@ void App::rebuild(ThrukServer *updated) {
             State prevWorst = previousWorst.value(s->conf.name, UP);
             previousWorst[s->conf.name] = w;
             notifyChange(diff, w, prevWorst);
+        } else if (quiet && s->hasData && s->error.isEmpty()) {
+            previousKeys[s->conf.name] = diffKeys(vis, nullptr);  // new baseline, nothing to notify
+            previousWorst[s->conf.name] = worstState(vis);
         }
         anyError |= !s->error.isEmpty();
         lines << (s->error.isEmpty() ? "● " : "✖ ") + s->conf.name + "  " +
@@ -722,20 +785,15 @@ void App::rebuild(ThrukServer *updated) {
         all += vis;
     }
 
-    // Nagstamon highlight_new_events: problem (host/service + state) not seen before stays
-    // fresh until the status window is hidden
-    QSet<QString> current;
+    // "new" = state changed (Thruk last_state_change) after the status window was last closed,
+    // or after startup. Nagstamon instead marks everything unseen by the app, so at start even
+    // hours-old problems would be "new".
     model.fresh.clear();
     model.rechecking.clear();
     for (const Item &i : all) {
-        QString k = i.key() + '\t' + stateName(i.state);
-        current.insert(k);
-        if (!eventHistory.contains(k)) eventHistory.insert(k, cfg.highlightNew);
-        if (eventHistory.value(k)) model.fresh.insert(i.key());
+        if (cfg.highlightNew && i.lastChange > seenSince) model.fresh.insert(i.key());
         if (auto *s = serverOf(i); s && s->isRechecking(i.key())) model.rechecking.insert(i.key());
     }
-    for (auto it = eventHistory.begin(); it != eventHistory.end();)
-        it = current.contains(it.key()) ? std::next(it) : eventHistory.erase(it);
 
     // keep selection across the model reset
     QSet<QString> selected;
@@ -783,7 +841,7 @@ void App::notifyChange(State diff, State serverWorst, State serverPrevWorst) {
                     for (const Item &i : applyFilters(s->raw, cfg.filters, now)) counts[i.state]++;
             for (State s : SEVERITY_DESC)
                 if (counts[s]) parts << QString("%1 %2").arg(counts[s]).arg(stateName(s));
-            tray.showMessage("naftamon", parts.join(", "), QSystemTrayIcon::Warning);
+            tray.showMessage("Naftamon", parts.join(", "), QSystemTrayIcon::Warning);
         }
     } else if (diff == UP && notifying && cfg.sound && cfg.soundRepeat) {
         playSound(worstNotified);
@@ -840,7 +898,7 @@ void App::updateTray(State worst, const int counts[STATE_COUNT]) {
     QStringList parts;
     for (State s : SEVERITY_DESC)
         if (counts[s]) parts << QString("%1 %2").arg(counts[s]).arg(stateName(s));
-    tray.setToolTip("naftamon: " + (parts.isEmpty() ? QString("all OK") : parts.join(", ")));
+    tray.setToolTip("Naftamon: " + (parts.isEmpty() ? QString("all OK") : parts.join(", ")));
 }
 
 void App::toggleWindow() {
@@ -952,13 +1010,14 @@ void App::runAction(const CustomAction &a, const Item &i) {
             QProcess::startDetached(t.first, t.second + run);
             return;
         }
-    tray.showMessage("naftamon", "No terminal emulator found. Set $TERMINAL or untick \"In terminal\".",
+    tray.showMessage("Naftamon", "No terminal emulator found. Set $TERMINAL or untick \"In terminal\".",
                      QSystemTrayIcon::Warning);
 }
 
 void App::updateEmptyHint() {
     bool anyData = std::any_of(servers.begin(), servers.end(), [](ThrukServer *s) { return s->hasData; });
-    QString t = !search->text().isEmpty() && proxy->rowCount() == 0 ? "No matches"
+    QString t = proxy->newOnly && proxy->rowCount() == 0 && !model.items.isEmpty() ? "No new problems"
+              : !search->text().isEmpty() && proxy->rowCount() == 0 ? "No matches"
               : model.items.isEmpty() && anyData                   ? "✓  All OK — no problems"
               : model.items.isEmpty()                              ? "Connecting…"
                                                                    : QString();
@@ -972,7 +1031,7 @@ bool App::eventFilter(QObject *o, QEvent *e) {
         return true;
     }
     if (o == window && e->type() == QEvent::Hide) {  // problems have been seen now
-        for (bool &fresh : eventHistory) fresh = false;
+        seenSince = QDateTime::currentSecsSinceEpoch();
         rebuild(nullptr);
     }
     return QObject::eventFilter(o, e);
@@ -1146,7 +1205,7 @@ bool App::editServer(ServerConf &s) {
     f->addRow(okCancel(&d));
     if (d.exec() != QDialog::Accepted) return false;
     if (name->text().trimmed().isEmpty() || url->text().trimmed().isEmpty()) {
-        QMessageBox::warning(window, "naftamon", "Name and URL are required.");
+        QMessageBox::warning(window, "Naftamon", "Name and URL are required.");
         return false;
     }
     s.name = name->text().trimmed();
@@ -1180,7 +1239,7 @@ void App::settingsDialog() {
     };
 
     QDialog d(window);
-    d.setWindowTitle("naftamon settings");
+    d.setWindowTitle("Naftamon settings");
     auto *lay = new QVBoxLayout(&d);
     auto *tabs = new QTabWidget;
     lay->addWidget(tabs);
@@ -1229,8 +1288,9 @@ void App::settingsDialog() {
     gf->addRow("Update interval:", interval);
     gf->addRow(new QLabel("Rechecks and other commands refresh immediately, independent of the interval."));
     gf->addRow(check("Show floating status bar", tmp.floatingBar));
-    gf->addRow(check("Highlight new problems (bold, flag N) until the status window is closed", tmp.highlightNew));
-    gf->addRow(check("Open the status window maximized at start", tmp.startMaximized));
+    gf->addRow(check("Highlight new problems (bold, flag N): state changed since the window was last closed",
+                     tmp.highlightNew));
+    gf->addRow(check("Open the status window at start", tmp.showAtStart));
     auto *closeBox = new QComboBox;
     closeBox->addItems({"Ask", "Minimize to tray", "Quit"});
     closeBox->setCurrentIndex(tmp.closeAction);
@@ -1284,7 +1344,7 @@ void App::settingsDialog() {
             r->reverse = rev->isChecked();
             r->enabled = en->isChecked() && r->re.isValid();
             if (en->isChecked() && !r->re.isValid())
-                QMessageBox::warning(window, "naftamon", "Invalid regular expression, filter disabled: " + pat->text());
+                QMessageBox::warning(window, "Naftamon", "Invalid regular expression, filter disabled: " + pat->text());
         });
     }
     fl->addWidget(reBox);

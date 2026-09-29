@@ -1,4 +1,4 @@
-# naftamon
+# Naftamon
 
 Native (C++/Qt6) Linux replacement for Nagstamon, for Thruk servers.
 
@@ -25,7 +25,7 @@ Measured cause of the slow "recheck" in Nagstamon (source read at commit ed379f9
 * it never sends `json`/`referer` to `cmd.cgi`, so Thruk's `use_wait_feature` (on by default, `wait_timeout=10`) is not used.
 * it sends no `CSRFtoken`; current Thruk rejects command POSTs without it unless the client is in `csrf_allowed_hosts`.
 
-naftamon:
+Naftamon:
 
 * sends commands with `CSRFtoken` and `json=1`, so Thruk replies once the check result is in, then re-polls immediately;
 * after a recheck polls only the affected host every 250 ms (`status.cgi?host=H`, a few rows, max 30 s) until the item has a newer `last_check`, then does one full refresh; rows show "⟳ rechecking…" meanwhile;
@@ -49,7 +49,8 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 * Custom actions (Settings → Actions), default "SSH" = `ssh $HOST$` in a terminal. Placeholders are shell-quoted
   (Nagstamon inserts them raw). Terminal: `$TERMINAL`, else konsole, gnome-terminal, kgx, xfce4-terminal, alacritty,
   kitty, foot, xterm.
-* New problems are bold with flag `N` until the status window is closed (Nagstamon `highlight_new_events`).
+* New problems are bold with flag `N`: their state changed (`last_state_change`) after the status window was last
+  closed, or after startup. Nagstamon marks everything the app has not seen yet, so all old problems are "new" at start.
 
 ## Deliberate differences
 
@@ -70,9 +71,9 @@ autologin key, hover-to-open popup, fullscreen / windowed mode, color customizat
 
 Copyright (C) 2026 nezaba
 
-naftamon is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+Naftamon is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
 License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any
 later version. See [LICENSE](LICENSE).
 
-naftamon reimplements the behaviour of [Nagstamon](https://github.com/HenriWahl/Nagstamon) (GPL-2.0-or-later);
+Naftamon reimplements the behaviour of [Nagstamon](https://github.com/HenriWahl/Nagstamon) (GPL-2.0-or-later);
 it contains no Nagstamon code.

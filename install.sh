@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install naftamon for the current user (Arch or Debian/Ubuntu): build dependencies, build,
+# Install Naftamon for the current user (Arch or Debian/Ubuntu): build dependencies, build,
 # binary in ~/.local/bin, entry + icon in the application launcher.
 #   sh install.sh              install / update
 #   sh install.sh --uninstall  remove binary, launcher entry and icon (settings are kept)
@@ -39,7 +39,7 @@ QT_QPA_PLATFORM=offscreen ./naftamon --export-icon "$icons/naftamon.png" 256  # 
 cat > "$apps/naftamon.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=naftamon
+Name=Naftamon
 GenericName=Monitoring status
 Comment=Fast Thruk / Nagios status monitor (Nagstamon compatible)
 Exec=$bin
@@ -50,4 +50,4 @@ Keywords=nagios;thruk;naemon;icinga;monitoring;nagstamon;alerts;
 StartupWMClass=naftamon
 EOF
 refresh_launcher
-echo "installed: $bin — search \"naftamon\" in your application launcher"
+echo "installed: $bin — search \"Naftamon\" in your application launcher"
