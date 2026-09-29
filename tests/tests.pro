@@ -1,0 +1,9 @@
+TEMPLATE = app
+TARGET = naftamon-tests
+QT = core network
+CONFIG += c++17 console
+SOURCES += test_main.cpp ../src/core.cpp ../src/thruk.cpp
+HEADERS += ../src/core.h ../src/thruk.h
+DESTDIR = .
+OBJECTS_DIR = obj
+MOC_DIR = obj

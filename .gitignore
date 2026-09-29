@@ -1,0 +1,10 @@
+# build output, rebuilt on each machine
+build/
+# local scratch: research clones, sanitizer builds
+.tmp/
+# clangd config with machine-specific Qt include paths
+compile_flags.txt
+.cache/
+# local AI assistant instructions/settings
+CLAUDE.md
+.claude/

@@ -1,0 +1,10 @@
+TEMPLATE = app
+TARGET = naftamon
+QT += widgets network multimedia
+CONFIG += c++17 release
+QMAKE_CXXFLAGS_RELEASE += -O2
+SOURCES += src/main.cpp src/core.cpp src/thruk.cpp src/ui.cpp
+HEADERS += src/core.h src/thruk.h src/ui.h
+DESTDIR = .
+OBJECTS_DIR = obj
+MOC_DIR = obj
