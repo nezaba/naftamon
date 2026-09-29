@@ -44,6 +44,7 @@ struct AppConfig {
     int ackExpireHours = 2, ackExpireMinutes = 0;
     bool highlightNew = true;  // Nagstamon highlight_new_events
     bool showAtStart = true;
+    bool newOnly = false;  // "N New only" quick filter
     int closeAction = 0;       // CloseAsk / CloseMinimize / CloseQuit
     QVector<CustomAction> customActions{{"SSH", "ssh $HOST$", true}};
     QString ackComment = "acknowledged", dtComment = "scheduled downtime";
@@ -127,7 +128,9 @@ private:
     QTimer pollTimer, tickTimer;
     StatusModel model;
     ItemProxy *proxy;
-    QToolButton *showAck, *showDowntime, *showFlapping, *newOnly;  // quick filters next to search
+    QToolButton *hideAck, *hideDowntime, *hideFlapping, *newOnly;  // quick filters next to search
+    QToolButton *updateBtn;
+    QNetworkAccessManager updateNam;
     StatusBar *bar;
     QWidget *window;
     QTableView *view;
@@ -160,6 +163,8 @@ private:
     void recheck(const QVector<Item> &items);
     void recheckHostServices(const QVector<Item> &items);
     void runAction(const CustomAction &a, const Item &i);
+    bool openInTerminal(const QString &cmd);
+    void checkForUpdates();
     void acknowledgeDialog(const QVector<Item> &items);
     void downtimeDialog(const QVector<Item> &items);
     void submitDialog(const Item &item);

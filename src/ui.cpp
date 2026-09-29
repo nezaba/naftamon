@@ -40,6 +40,9 @@
 #include <QTableView>
 #include <QTableWidget>
 #include <QToolButton>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkReply>
 #include <QWindow>
 #include <QtMath>
 
@@ -59,6 +62,7 @@ QColor stateFg(State s) {
     return (s == UNKNOWN || s == WARNING) ? QColor("#000000") : QColor("#FFFFFF");
 }
 static const QColor ERROR_BG("#D3D3D3"), ERROR_FG("#000000");
+static const char REPO[] = "nezaba/naftamon";  // GitHub repo used by "Check for updates"
 static const State SEVERITY_DESC[] = {DOWN, UNREACHABLE, CRITICAL, UNKNOWN, WARNING};
 static const State SOUND_STATES[] = {WARNING, CRITICAL, DOWN};  // Nagstamon STATES_SOUND
 
@@ -107,6 +111,7 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
         {"ack_expire", &c.ackExpire},
         {"highlight_new_events", &c.highlightNew},
         {"show_window_at_start", &c.showAtStart},
+        {"filter_new_only", &c.newOnly},
     };
 }
 
@@ -470,36 +475,27 @@ App::App() : proxy(new ItemProxy) {
     search->setFixedWidth(search->fontMetrics().horizontalAdvance('x') * 32);
     top->addWidget(search);
     top->addSpacing(8);
-    // quick filters, also the legend of the row flags; A/D/F are the Settings → Filters switches
-    auto toggle = [&](const QString &text) {
+    // quick filters, also the legend of the row flags. All four work alike: pressed = filter on,
+    // state is saved. A/D/F are the Settings → Filters switches.
+    auto toggle = [&](const QString &text, std::function<void(bool)> set) {
         auto *b = new QToolButton;
         b->setText(text);
         b->setCheckable(true);
-        b->setAutoRaise(true);
         top->addWidget(b);
-        return b;
-    };
-    showAck = toggle("A  Acknowledged");
-    showDowntime = toggle("D  Downtime");
-    showFlapping = toggle("F  Flapping");
-    newOnly = toggle("N  New only");
-    newOnly->setToolTip("Show only new problems (bold, flag N) — not seen since the window was last closed");
-    auto filterToggle = [this](QToolButton *b, std::function<void(bool)> setHidden) {
-        connect(b, &QToolButton::clicked, this, [this, setHidden](bool shown) {
-            setHidden(!shown);
+        connect(b, &QToolButton::clicked, this, [this, set](bool on) {
+            set(on);
             cfg.save();
             syncToggles();
             rebuild(nullptr, true);
         });
+        return b;
     };
-    filterToggle(showAck, [this](bool h) { cfg.filters.acknowledged = h; });
-    filterToggle(showDowntime, [this](bool h) { cfg.filters.downtime = h; });
-    filterToggle(showFlapping, [this](bool h) { cfg.filters.allFlappingHosts = cfg.filters.allFlappingServices = h; });
-    connect(newOnly, &QToolButton::toggled, this, [this](bool on) {
-        proxy->newOnly = on;
-        proxy->refilter();
-        updateEmptyHint();
+    hideAck = toggle("A  Acknowledged", [this](bool on) { cfg.filters.acknowledged = on; });
+    hideDowntime = toggle("D  Downtime", [this](bool on) { cfg.filters.downtime = on; });
+    hideFlapping = toggle("F  Flapping", [this](bool on) {
+        cfg.filters.allFlappingHosts = cfg.filters.allFlappingServices = on;
     });
+    newOnly = toggle("N  New only", [this](bool on) { cfg.newOnly = on; });
     top->addStretch();
     auto tool = [&](const char *icon, const QString &text, const QString &tip) {
         auto *b = new QToolButton;
@@ -568,7 +564,23 @@ App::App() : proxy(new ItemProxy) {
     muted.setAlphaF(0.7);
     sp.setColor(QPalette::WindowText, muted);
     serverLine->setPalette(sp);
-    v->addWidget(serverLine);
+    auto *bottom = new QHBoxLayout;
+    bottom->addWidget(serverLine, 1);
+    auto *version = new QLabel("v " NAFTAMON_COMMIT);
+    version->setFont(small);
+    version->setPalette(sp);
+    version->setToolTip("Git commit this build was made from");
+    bottom->addWidget(version);
+    updateBtn = new QToolButton;
+    updateBtn->setText("Check for updates");
+    updateBtn->setIcon(QIcon::fromTheme("system-software-update"));
+    updateBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    updateBtn->setAutoRaise(true);
+    updateBtn->setFont(small);
+    updateBtn->setToolTip(QString("Compare with the latest version on github.com/") + REPO + " and update");
+    connect(updateBtn, &QToolButton::clicked, this, &App::checkForUpdates);
+    bottom->addWidget(updateBtn);
+    v->addLayout(bottom);
 
     auto *find = new QShortcut(QKeySequence::Find, window);
     connect(find, &QShortcut::activated, search, [this] { search->setFocus(); search->selectAll(); });
@@ -734,20 +746,27 @@ void App::applyConfig() {
 }
 
 // pressed = shown; hidden kinds get a struck-through label
+// pressed = filter on; hidden kinds also get a struck-through label
 void App::syncToggles() {
     const Filters &f = cfg.filters;
     const std::tuple<QToolButton *, bool, const char *> t[] = {
-        {showAck, f.acknowledged, "acknowledged problems"},
-        {showDowntime, f.downtime, "problems in downtime"},
-        {showFlapping, f.allFlappingHosts && f.allFlappingServices, "flapping problems"}};
+        {hideAck, f.acknowledged, "acknowledged problems"},
+        {hideDowntime, f.downtime, "problems in downtime"},
+        {hideFlapping, f.allFlappingHosts && f.allFlappingServices, "flapping problems"}};
     for (auto [b, hidden, what] : t) {
-        b->setChecked(!hidden);
+        b->setChecked(hidden);
         QFont font = b->font();
         font.setStrikeOut(hidden);
         b->setFont(font);
-        b->setToolTip(QString(hidden ? "Hiding %1 — click to show them" : "Showing %1 — click to hide them") .arg(what) +
+        b->setToolTip(QString(hidden ? "Hiding %1 — click to show them" : "Showing %1 — click to hide them").arg(what) +
                       " (same as Settings → Filters)");
     }
+    newOnly->setChecked(cfg.newOnly);
+    newOnly->setToolTip(cfg.newOnly ? "Showing only new problems (flag N) — click to show all"
+                                    : "Click to show only new problems (flag N): state changed since the window was "
+                                      "last closed");
+    proxy->newOnly = cfg.newOnly;
+    proxy->refilter();
 }
 
 ThrukServer *App::serverOf(const Item &i) const {
@@ -993,25 +1012,67 @@ void App::runAction(const CustomAction &a, const Item &i) {
         QProcess::startDetached("/bin/sh", {"-c", cmd});
         return;
     }
+    if (!openInTerminal(cmd))
+        tray.showMessage("Naftamon", "No terminal emulator found. Set $TERMINAL or untick \"In terminal\".",
+                         QSystemTrayIcon::Warning);
+}
+
+bool App::openInTerminal(const QString &cmd) {
     // keep the window open when the command fails, so e.g. an ssh error can be read
     // `trap : INT`: Ctrl+C stops the command (handlers reset on exec) but not this wrapper shell,
     // so the terminal does not report "sh crashed" and still shows the message below
     QStringList run{"sh", "-c", "trap : INT; " + cmd + " || { rc=$?; echo; echo \"[exit $rc] press Enter to close\"; read _; }"};
     QString env = qEnvironmentVariable("TERMINAL");
-    if (!env.isEmpty() && !QStandardPaths::findExecutable(env).isEmpty()) {
-        QProcess::startDetached(env, QStringList{"-e"} + run);
-        return;
-    }
+    if (!env.isEmpty() && !QStandardPaths::findExecutable(env).isEmpty())
+        return QProcess::startDetached(env, QStringList{"-e"} + run);
     static const QList<QPair<QString, QStringList>> terminals = {
         {"konsole", {"-e"}}, {"gnome-terminal", {"--"}}, {"kgx", {"--"}}, {"xfce4-terminal", {"-x"}},
         {"alacritty", {"-e"}}, {"kitty", {}}, {"foot", {}}, {"xterm", {"-e"}}, {"x-terminal-emulator", {"-e"}}};
     for (const auto &t : terminals)
-        if (!QStandardPaths::findExecutable(t.first).isEmpty()) {
-            QProcess::startDetached(t.first, t.second + run);
+        if (!QStandardPaths::findExecutable(t.first).isEmpty()) return QProcess::startDetached(t.first, t.second + run);
+    return false;
+}
+
+// "Check for updates": latest commit of the GitHub repo vs the commit this binary was built from.
+// Updating runs in a terminal (progress visible): download, rebuild, reinstall, restart.
+void App::checkForUpdates() {
+    updateBtn->setEnabled(false);
+    updateBtn->setText("Checking…");
+    QNetworkRequest req(QUrl(QString("https://api.github.com/repos/%1/commits/main").arg(REPO)));
+    req.setRawHeader("Accept", "application/vnd.github+json");
+    req.setHeader(QNetworkRequest::UserAgentHeader, "naftamon");
+    req.setTransferTimeout(15000);
+    QNetworkReply *r = updateNam.get(req);
+    connect(r, &QNetworkReply::finished, this, [this, r] {
+        r->deleteLater();
+        updateBtn->setEnabled(true);
+        updateBtn->setText("Check for updates");
+        QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
+        QString latest = o["sha"].toString().left(12), mine = NAFTAMON_COMMIT;
+        if (r->error() != QNetworkReply::NoError || latest.isEmpty()) {
+            QMessageBox::warning(window, "Naftamon", "Could not check for updates:\n" + r->errorString());
             return;
         }
-    tray.showMessage("Naftamon", "No terminal emulator found. Set $TERMINAL or untick \"In terminal\".",
-                     QSystemTrayIcon::Warning);
+        if (latest.startsWith(mine.left(12)) && mine != "unknown") {
+            QMessageBox::information(window, "Naftamon", "Naftamon is up to date (" + mine + ").");
+            return;
+        }
+        QJsonObject c = o["commit"].toObject();
+        QString text = QString("A newer version is available.\n\nInstalled:  %1\nLatest:      %2  (%3)\n\"%4\"\n\n"
+                               "Download, rebuild and restart Naftamon now?\nA terminal shows the progress; "
+                               "monitoring continues until the new version starts.")
+                           .arg(mine, latest, c["committer"].toObject()["date"].toString().left(10),
+                                c["message"].toString().section('\n', 0, 0));
+        if (QMessageBox::question(window, "Naftamon", text) != QMessageBox::Yes) return;
+        QString url = QString("https://github.com/%1/archive/refs/heads/main.tar.gz").arg(REPO);
+        QString cmd = QString("( set -e; d=\"$HOME/.cache/naftamon-update\"; rm -rf \"$d\"; mkdir -p \"$d\"; "
+                              "echo \"Downloading %1\"; { curl -fsSL %1 || wget -qO- %1; } | tar xz -C \"$d\"; "
+                              "NAFTAMON_COMMIT=%2 sh \"$d\"/naftamon-main/install.sh --update )")
+                          .arg(url, latest);  // latest is hex from GitHub, url is a constant
+        if (!openInTerminal(cmd))
+            QMessageBox::warning(window, "Naftamon", "No terminal emulator found (set $TERMINAL). Update manually:\n"
+                                                     "git pull && sh install.sh");
+    });
 }
 
 void App::updateEmptyHint() {

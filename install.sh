@@ -3,6 +3,7 @@
 # binary in ~/.local/bin, entry + icon in the application launcher.
 #   sh install.sh              install / update
 #   sh install.sh --uninstall  remove binary, launcher entry and icon (settings are kept)
+#   sh install.sh --update     used by "Check for updates": skip dependencies if present, restart after
 set -e
 cd "$(dirname "$0")"
 bin=~/.local/bin/naftamon
@@ -22,7 +23,9 @@ if [ "$1" = "--uninstall" ]; then
     exit 0
 fi
 
-if command -v pacman >/dev/null; then
+if [ "$1" = "--update" ] && command -v qmake6 >/dev/null; then
+    :  # dependencies already installed
+elif command -v pacman >/dev/null; then
     sudo pacman -S --needed --noconfirm base-devel qt6-base qt6-multimedia qt6-multimedia-ffmpeg
 elif command -v apt >/dev/null; then
     sudo apt install -y build-essential qmake6 qt6-base-dev qt6-multimedia-dev libgl-dev libglx-dev libopengl-dev
@@ -30,7 +33,7 @@ else
     echo "unsupported distro: install Qt6 base + multimedia dev packages and qmake6, then rerun" >&2
 fi
 rm -rf build && mkdir build && cd build
-qmake6 ../naftamon.pro && make -j"$(nproc)"
+qmake6 ../naftamon.pro ${NAFTAMON_COMMIT:+NAFTAMON_COMMIT=$NAFTAMON_COMMIT} && make -j"$(nproc)"
 
 pkill -x naftamon || true  # replace a running copy
 mkdir -p ~/.local/bin "$apps" "$icons"
@@ -51,3 +54,7 @@ StartupWMClass=naftamon
 EOF
 refresh_launcher
 echo "installed: $bin — search \"Naftamon\" in your application launcher"
+if [ "$1" = "--update" ]; then
+    setsid -f "$bin" >/dev/null 2>&1 </dev/null  # restart, detached from this terminal
+    echo "Naftamon restarted"
+fi
