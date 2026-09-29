@@ -29,6 +29,7 @@
 #include <QPainterPath>
 #include <QProcess>
 #include <QProgressDialog>
+#include <QStyledItemDelegate>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScreen>
@@ -113,6 +114,7 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
         {"highlight_new_events", &c.highlightNew},
         {"show_window_at_start", &c.showAtStart},
         {"filter_new_only", &c.newOnly},
+        {"last_check_relative", &c.relativeLastCheck},
     };
 }
 
@@ -245,21 +247,50 @@ void StatusModel::setItems(QVector<Item> v) {
 }
 
 void StatusModel::tick() {
-    if (!items.isEmpty()) emit dataChanged(index(0, Duration), index(items.size() - 1, Duration), {Qt::DisplayRole});
+    if (!items.isEmpty()) emit dataChanged(index(0, LastCheck), index(items.size() - 1, Duration), {Qt::DisplayRole});
 }
 
-static QString withFlags(const QString &name, const QString &flags) {
-    return flags.isEmpty() ? name : name + "  [" + flags + "]";
+static QString flagText(QChar f) {
+    switch (f.unicode()) {
+    case 'A': return "Acknowledged";
+    case 'D': return "Scheduled downtime";
+    case 'F': return "Flapping";
+    case 'P': return "Passive only (active checks disabled)";
+    case 'N': return "New: state changed since the window was last closed";
+    }
+    return {};
+}
+
+static QString relativeTime(qint64 t, qint64 now) {
+    qint64 d = qMax<qint64>(0, now - t);
+    if (d < 60) return QString("%1 s ago").arg(d);
+    if (d < 3600) return QString("%1 min ago").arg(d / 60);
+    if (d < 86400) return QString("%1 h ago").arg(d / 3600);
+    return QString("%1 d ago").arg(d / 86400);
 }
 
 QVariant StatusModel::data(const QModelIndex &idx, int role) const {
     const Item &i = items[idx.row()];
     if (role == Qt::BackgroundRole) return stateBg(i.state);
     if (role == Qt::ForegroundRole) return stateFg(i.state);
-    if (role == Qt::ToolTipRole) return i.output;
+    if (role == FlagsRole) {
+        QString n = fresh.contains(i.key()) ? "N" : "";
+        if (idx.column() == Host) return i.isHost() ? i.flags() + n : i.hostFlags;
+        if (idx.column() == Service && !i.isHost()) return i.flags() + n;
+        return {};
+    }
+    if (role == Qt::ToolTipRole) {
+        if (idx.column() == LastCheck) return QDateTime::fromSecsSinceEpoch(i.lastCheck).toString("yyyy-MM-dd HH:mm:ss");
+        QStringList tip;
+        QString flags = data(idx, FlagsRole).toString();
+        for (QChar f : flags) tip << (idx.column() == Host && !i.isHost() ? "Host: " : "") + flagText(f);
+        tip << i.output;
+        return tip.join('\n');
+    }
     if (role == Qt::FontRole) {
         QFont f;
-        f.setBold(fresh.contains(i.key()));
+        if (idx.column() == Host) f.setWeight(QFont::DemiBold);
+        if (fresh.contains(i.key())) f.setBold(true);
         f.setItalic(rechecking.contains(i.key()));
         return f;
     }
@@ -275,10 +306,12 @@ QVariant StatusModel::data(const QModelIndex &idx, int role) const {
     if (role != Qt::DisplayRole) return {};
     switch (idx.column()) {
     case Server: return i.server;
-    case Host: return withFlags(i.host, i.isHost() ? i.flags() + (fresh.contains(i.key()) ? "N" : "") : i.hostFlags);
-    case Service: return i.isHost() ? QString() : withFlags(i.service, i.flags() + (fresh.contains(i.key()) ? "N" : ""));
+    case Host: return i.host;
+    case Service: return i.service;
     case Status: return stateName(i.state) + (rechecking.contains(i.key()) ? "  ⟳ rechecking…" : "");
-    case LastCheck: return QDateTime::fromSecsSinceEpoch(i.lastCheck).toString("yyyy-MM-dd HH:mm:ss");
+    case LastCheck:
+        return relativeLastCheck ? relativeTime(i.lastCheck, QDateTime::currentSecsSinceEpoch())
+                                 : QDateTime::fromSecsSinceEpoch(i.lastCheck).toString("yyyy-MM-dd HH:mm:ss");
     case Duration: return humanDuration(i.lastChange, QDateTime::currentSecsSinceEpoch());
     case Attempt: return QString("%1/%2").arg(i.attempt).arg(i.maxAttempts);
     case Info: return i.output;
@@ -292,6 +325,95 @@ QVariant StatusModel::headerData(int section, Qt::Orientation o, int role) const
     if (o == Qt::Horizontal && role == Qt::DisplayRole) return H[section];
     return {};
 }
+
+// ---------------------------------------------------------------- flag badges, row painting
+
+// Small round badge for a row flag: A check mark, D clock, F zigzag, P pause, N dot.
+static void drawBadge(QPainter *p, const QRectF &r, QChar f, const QColor &disk, const QColor &glyph) {
+    p->setPen(Qt::NoPen);
+    p->setBrush(disk);
+    p->drawEllipse(r);
+    const double w = r.width(), in = w * 0.28;
+    const QRectF g = r.adjusted(in, in, -in, -in);
+    const QPointF c = r.center();
+    p->setPen(QPen(glyph, qMax(1.2, w * 0.13), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p->setBrush(Qt::NoBrush);
+    switch (f.unicode()) {
+    case 'A': {
+        const QPointF pts[] = {{g.left(), c.y()}, {g.left() + g.width() * 0.38, g.bottom()}, {g.right(), g.top()}};
+        p->drawPolyline(pts, 3);
+        break;
+    }
+    case 'D':
+        p->drawLine(c, QPointF(c.x(), g.top()));
+        p->drawLine(c, QPointF(g.right() - g.width() * 0.1, c.y()));
+        break;
+    case 'F': {
+        const QPointF pts[] = {{g.left(), c.y()}, {g.left() + g.width() / 3, g.top()},
+                               {g.left() + 2 * g.width() / 3, g.bottom()}, {g.right(), c.y()}};
+        p->drawPolyline(pts, 4);
+        break;
+    }
+    case 'P':
+        p->drawLine(QPointF(c.x() - w * 0.1, g.top()), QPointF(c.x() - w * 0.1, g.bottom()));
+        p->drawLine(QPointF(c.x() + w * 0.1, g.top()), QPointF(c.x() + w * 0.1, g.bottom()));
+        break;
+    case 'N':
+        p->setPen(Qt::NoPen);
+        p->setBrush(glyph);
+        p->drawEllipse(c, w * 0.2, w * 0.2);
+        break;
+    }
+}
+
+// badge as an icon for the quick-filter buttons, in the palette's text color
+static QIcon badgeIcon(QChar f, const QPalette &pal) {
+    QPixmap pm(32, 32);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    drawBadge(&p, QRectF(2, 2, 28, 28), f, pal.color(QPalette::Text), pal.color(QPalette::Base));
+    return QIcon(pm);
+}
+
+// Draws the flags of Host/Service cells as badges after the name, and a faint line under each
+// row instead of the full grid. Cost: a few shapes per visible cell.
+class RowDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &idx) const override {
+        QString flags = idx.data(StatusModel::FlagsRole).toString();
+        if (flags.isEmpty()) {
+            QStyledItemDelegate::paint(p, option, idx);
+        } else {
+            QStyleOptionViewItem o(option);
+            initStyleOption(&o, idx);
+            const QWidget *w = o.widget;
+            QStyle *st = w ? w->style() : QApplication::style();
+            const int margin = st->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, w) + 1;
+            const int d = o.fontMetrics.height() - 3, gap = 3, badges = int(flags.size()) * (d + gap) + 4;
+            o.text = o.fontMetrics.elidedText(o.text, Qt::ElideRight, qMax(0, o.rect.width() - badges - 2 * margin));
+            st->drawControl(QStyle::CE_ItemViewItem, &o, p, w);
+            double x = o.rect.left() + margin + o.fontMetrics.horizontalAdvance(o.text) + 6;
+            const double y = o.rect.center().y() - d / 2.0 + 0.5;
+            const QColor disk = idx.data(Qt::ForegroundRole).value<QColor>();
+            const QColor glyph = idx.data(Qt::BackgroundRole).value<QColor>();
+            p->save();
+            p->setRenderHint(QPainter::Antialiasing);
+            for (QChar f : flags) {
+                drawBadge(p, QRectF(x, y, d, d), f, disk, glyph);
+                x += d + gap;
+            }
+            p->restore();
+        }
+        QColor line = option.palette.color(QPalette::Text);
+        line.setAlphaF(0.15);
+        p->save();
+        p->setPen(line);
+        p->drawLine(option.rect.bottomLeft(), option.rect.bottomRight());
+        p->restore();
+    }
+};
 
 // ---------------------------------------------------------------- floating status bar
 
@@ -476,6 +598,21 @@ App::App() : proxy(new ItemProxy) {
     search->setFixedWidth(search->fontMetrics().horizontalAdvance('x') * 32);
     top->addWidget(search);
     top->addSpacing(8);
+    // one chip per problem state with its count; click = show only that state (not saved)
+    for (State st : SEVERITY_DESC) {
+        auto *c = new QToolButton;
+        c->setCheckable(true);
+        c->setToolTip("Show only " + stateName(st) + " — click again to show all");
+        c->setStyleSheet(QString("QToolButton{background:%1;color:%2;border:2px solid transparent;border-radius:10px;"
+                                 "padding:1px 8px;font-weight:600;}"
+                                 "QToolButton:checked{border-color:palette(highlight);}")
+                             .arg(stateBg(st).name(), stateFg(st).name()));
+        c->hide();
+        connect(c, &QToolButton::clicked, this, [this, st](bool on) { showOnlyState(on ? st : STATE_COUNT); });
+        chips[st] = c;
+        top->addWidget(c);
+    }
+    top->addSpacing(8);
     // quick filters, also the legend of the row flags. All four work alike: pressed = filter on,
     // state is saved. A/D/F are the Settings → Filters switches.
     auto toggle = [&](const QString &text, std::function<void(bool)> set) {
@@ -491,12 +628,17 @@ App::App() : proxy(new ItemProxy) {
         });
         return b;
     };
-    hideAck = toggle("A  Acknowledged", [this](bool on) { cfg.filters.acknowledged = on; });
-    hideDowntime = toggle("D  Downtime", [this](bool on) { cfg.filters.downtime = on; });
-    hideFlapping = toggle("F  Flapping", [this](bool on) {
+    hideAck = toggle("Acknowledged", [this](bool on) { cfg.filters.acknowledged = on; });
+    hideDowntime = toggle("Downtime", [this](bool on) { cfg.filters.downtime = on; });
+    hideFlapping = toggle("Flapping", [this](bool on) {
         cfg.filters.allFlappingHosts = cfg.filters.allFlappingServices = on;
     });
-    newOnly = toggle("N  New only", [this](bool on) { cfg.newOnly = on; });
+    newOnly = toggle("New only", [this](bool on) { cfg.newOnly = on; });
+    const std::pair<QToolButton *, char> badgeOf[] = {{hideAck, 'A'}, {hideDowntime, 'D'}, {hideFlapping, 'F'}, {newOnly, 'N'}};
+    for (auto [b, f] : badgeOf) {
+        b->setIcon(badgeIcon(QChar(f), b->palette()));  // same badge as in the rows: doubles as the legend
+        b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    }
     top->addStretch();
     auto tool = [&](const char *icon, const QString &text, const QString &tip) {
         auto *b = new QToolButton;
@@ -523,7 +665,9 @@ App::App() : proxy(new ItemProxy) {
     view->setContextMenuPolicy(Qt::CustomContextMenu);
     view->setFrameShape(QFrame::NoFrame);
     view->verticalHeader()->hide();
-    view->verticalHeader()->setDefaultSectionSize(view->fontMetrics().height() + 8);
+    view->verticalHeader()->setDefaultSectionSize(view->fontMetrics().height() + 11);
+    view->setShowGrid(false);  // RowDelegate draws a faint line under each row instead
+    view->setItemDelegate(new RowDelegate(view));
     auto *hh = view->horizontalHeader();
     hh->setStretchLastSection(true);
     hh->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -533,7 +677,7 @@ App::App() : proxy(new ItemProxy) {
     const std::pair<int, const char *> widths[] = {
         {StatusModel::Server, "server-name"}, {StatusModel::Host, "host-name.example.com"},
         {StatusModel::Service, "service description"}, {StatusModel::Status, "UNREACHABLE  ⟳ rech"},
-        {StatusModel::LastCheck, "2026-01-01 00:00:00"}, {StatusModel::Duration, "10d 23h 59m 59s"},
+        {StatusModel::LastCheck, cfg.relativeLastCheck ? "59 min ago" : "2026-01-01 00:00:00"}, {StatusModel::Duration, "10d 23h 59m 59s"},
         {StatusModel::Attempt, "Attempt"}};
     for (auto [col, sample] : widths) view->setColumnWidth(col, fm.horizontalAdvance(sample) + 24);
     if (!cfg.headerState.isEmpty()) hh->restoreState(cfg.headerState);
@@ -557,12 +701,44 @@ App::App() : proxy(new ItemProxy) {
     });
     v->addWidget(view, 1);
 
-    // shown over the empty table
+    // shown over the empty table: faded logo + text
+    emptyLogo = new QLabel(view->viewport());
+    QPixmap logo(96, 96);
+    logo.fill(Qt::transparent);
+    {
+        QPainter lp(&logo);
+        lp.setOpacity(0.35);
+        lp.drawPixmap(0, 0, appIconPixmap(96));
+    }
+    emptyLogo->setPixmap(logo);
     emptyHint = new QLabel(view->viewport());
-    emptyHint->setAlignment(Qt::AlignCenter);
-    emptyHint->setAttribute(Qt::WA_TransparentForMouseEvents);
+    for (QLabel *l : {emptyLogo, emptyHint}) {
+        l->setAlignment(Qt::AlignCenter);
+        l->setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
     auto *vl = new QVBoxLayout(view->viewport());
+    vl->addStretch();
+    vl->addWidget(emptyLogo);
     vl->addWidget(emptyHint);
+    vl->addStretch();
+
+    // inline message banner above the table (instead of pop-ups for non-questions)
+    banner = new QFrame;
+    auto *bl = new QHBoxLayout(banner);
+    bl->setContentsMargins(10, 4, 4, 4);
+    bannerText = new QLabel;
+    bannerText->setWordWrap(true);
+    bannerText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto *bannerClose = new QToolButton;
+    bannerClose->setText("✕");
+    bannerClose->setAutoRaise(true);
+    connect(bannerClose, &QToolButton::clicked, banner, &QWidget::hide);
+    bl->addWidget(bannerText, 1);
+    bl->addWidget(bannerClose);
+    banner->hide();
+    bannerTimer.setSingleShot(true);
+    connect(&bannerTimer, &QTimer::timeout, banner, &QWidget::hide);
+    v->insertWidget(v->indexOf(view), banner);
 
     // per-server state, small and muted at the bottom
     serverLine = new QLabel;
@@ -734,7 +910,8 @@ void App::applyConfig() {
         connect(s, &ThrukServer::recheckingChanged, this, [this] { rebuild(nullptr); });
         connect(s, &ThrukServer::commandFailed, this, [this](const QString &msg) {
             lastError = msg;
-            tray.showMessage("Naftamon: command failed", msg, QSystemTrayIcon::Warning);
+            showBanner("Command failed: " + msg, true);
+            if (!window->isVisible()) tray.showMessage("Naftamon: command failed", msg, QSystemTrayIcon::Warning);
             rebuild(nullptr);
         });
         servers.append(s);
@@ -752,6 +929,7 @@ void App::applyConfig() {
     }
     tray.show();
     if (!cfg.floatingBar && !QSystemTrayIcon::isSystemTrayAvailable()) window->show();
+    model.relativeLastCheck = cfg.relativeLastCheck;
     syncToggles();
     rebuild(nullptr, true);  // filters may have changed: re-filter quietly
 }
@@ -839,6 +1017,11 @@ void App::rebuild(ThrukServer *updated, bool quiet) {
         view->selectionModel()->select(sel, QItemSelectionModel::Select | QItemSelectionModel::Rows);
     }
 
+    for (State st : SEVERITY_DESC) {
+        chips[st]->setText(QString("%1 %2").arg(counts[st]).arg(stateName(st)));
+        chips[st]->setVisible(counts[st] > 0);
+    }
+    if (proxy->stateOnly < STATE_COUNT && counts[proxy->stateOnly] == 0) showOnlyState(STATE_COUNT);
     updateEmptyHint();
     bar->setCounts(counts, anyError);
     State worst = worstState(all);
@@ -1023,9 +1206,7 @@ void App::runAction(const CustomAction &a, const Item &i) {
         QProcess::startDetached("/bin/sh", {"-c", cmd});
         return;
     }
-    if (!openInTerminal(cmd))
-        tray.showMessage("Naftamon", "No terminal emulator found. Set $TERMINAL or untick \"In terminal\".",
-                         QSystemTrayIcon::Warning);
+    if (!openInTerminal(cmd)) showBanner("No terminal emulator found. Set $TERMINAL or untick \"In terminal\".", true);
 }
 
 bool App::openInTerminal(const QString &cmd) {
@@ -1061,11 +1242,11 @@ void App::checkForUpdates() {
         QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
         QString latest = o["sha"].toString().left(12), mine = NAFTAMON_COMMIT;
         if (r->error() != QNetworkReply::NoError || latest.isEmpty()) {
-            QMessageBox::warning(window, "Naftamon", "Could not check for updates:\n" + r->errorString());
+            showBanner("Could not check for updates: " + r->errorString(), true);
             return;
         }
         if (latest.startsWith(mine.left(12)) && mine != "unknown") {
-            QMessageBox::information(window, "Naftamon", "Naftamon is up to date (" + mine + ").");
+            showBanner("Naftamon is up to date (" + mine + ").");
             return;
         }
         QString date = o["commit"].toObject()["committer"].toObject()["date"].toString().left(10);
@@ -1137,13 +1318,39 @@ void App::runUpdate(const QString &latest) {
 
 void App::updateEmptyHint() {
     bool anyData = std::any_of(servers.begin(), servers.end(), [](ThrukServer *s) { return s->hasData; });
-    QString t = proxy->newOnly && proxy->rowCount() == 0 && !model.items.isEmpty() ? "No new problems"
+    QString t = proxy->stateOnly < STATE_COUNT && proxy->rowCount() == 0 && !model.items.isEmpty() ? "Nothing to show"
+              : proxy->newOnly && proxy->rowCount() == 0 && !model.items.isEmpty() ? "No new problems"
               : !search->text().isEmpty() && proxy->rowCount() == 0 ? "No matches"
               : model.items.isEmpty() && anyData                   ? "✓  All OK — no problems"
+              : model.items.isEmpty() && !lastErrorFree()          ? "No connection — see the status line below"
               : model.items.isEmpty()                              ? "Connecting…"
                                                                    : QString();
     emptyHint->setText(t);
     emptyHint->setVisible(!t.isEmpty());
+    emptyLogo->setVisible(!t.isEmpty());
+}
+
+bool App::lastErrorFree() const {
+    return std::none_of(servers.begin(), servers.end(), [](ThrukServer *s) { return !s->error.isEmpty(); });
+}
+
+void App::showBanner(const QString &text, bool error) {
+    QColor c = error ? QColor("#d9534f") : window->palette().color(QPalette::Highlight);
+    QColor bg = c;
+    bg.setAlphaF(0.18);
+    banner->setStyleSheet(QString("QFrame{background:rgba(%1,%2,%3,%4);border-left:4px solid %5;border-radius:4px;}")
+                              .arg(bg.red()).arg(bg.green()).arg(bg.blue()).arg(bg.alphaF()).arg(c.name()));
+    bannerText->setText(text);
+    banner->show();
+    bannerTimer.start(error ? 15000 : 6000);
+}
+
+// status chip: show only one state (STATE_COUNT = all)
+void App::showOnlyState(State st) {
+    for (State s : SEVERITY_DESC) chips[s]->setChecked(s == st);
+    proxy->stateOnly = st;
+    proxy->refilter();
+    updateEmptyHint();
 }
 
 bool App::eventFilter(QObject *o, QEvent *e) {
@@ -1437,6 +1644,11 @@ void App::settingsDialog() {
     gf->addRow(check("Highlight new problems (bold, flag N): state changed since the window was last closed",
                      tmp.highlightNew));
     gf->addRow(check("Open the status window at start", tmp.showAtStart));
+    auto *lastCheckBox = new QComboBox;
+    lastCheckBox->addItems({"Relative (12 s ago)", "Date and time"});
+    lastCheckBox->setCurrentIndex(tmp.relativeLastCheck ? 0 : 1);
+    commit.append([&tmp, lastCheckBox] { tmp.relativeLastCheck = lastCheckBox->currentIndex() == 0; });
+    gf->addRow("Last Check column:", lastCheckBox);
     auto *closeBox = new QComboBox;
     closeBox->addItems({"Ask", "Minimize to tray", "Quit"});
     closeBox->setCurrentIndex(tmp.closeAction);

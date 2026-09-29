@@ -15,6 +15,7 @@ class QAudioOutput;
 class QBuffer;
 class QLineEdit;
 class QToolButton;
+class QFrame;
 
 QColor stateBg(State s);
 QColor stateFg(State s);
@@ -45,6 +46,7 @@ struct AppConfig {
     bool highlightNew = true;  // Nagstamon highlight_new_events
     bool showAtStart = true;
     bool newOnly = false;  // "N New only" quick filter
+    bool relativeLastCheck = true;
     int closeAction = 0;       // CloseAsk / CloseMinimize / CloseQuit
     QVector<CustomAction> customActions{{"SSH", "ssh $HOST$", true}};
     QString ackComment = "acknowledged", dtComment = "scheduled downtime";
@@ -62,6 +64,8 @@ class StatusModel : public QAbstractTableModel {
     Q_OBJECT
 public:
     enum Col { Server, Host, Service, Status, LastCheck, Duration, Attempt, Info, COLS };
+    enum { FlagsRole = Qt::UserRole + 1 };  // "ADFPN" flags of Host/Service cells, painted as badges
+    bool relativeLastCheck = true;
     QVector<Item> items;
     QSet<QString> rechecking;  // item keys with a recheck in progress
     QSet<QString> fresh;       // item keys of new problems not yet seen (Nagstamon "N" flag)
@@ -78,6 +82,7 @@ class ItemProxy : public QSortFilterProxyModel {
 public:
     const StatusModel *m = nullptr;
     bool newOnly = false;
+    State stateOnly = STATE_COUNT;  // status chip filter, STATE_COUNT = all
     void refilter() {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
         beginFilterChange();
@@ -89,6 +94,7 @@ public:
 protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override {
         if (newOnly && !m->fresh.contains(m->items[row].key())) return false;
+        if (stateOnly < STATE_COUNT && m->items[row].state != stateOnly) return false;
         return QSortFilterProxyModel::filterAcceptsRow(row, parent);
     }
 };
@@ -136,7 +142,10 @@ private:
     QTableView *view;
     QLabel *serverLine;
     QLineEdit *search;
-    QLabel *emptyHint;
+    QLabel *emptyHint, *emptyLogo, *bannerText;
+    QFrame *banner;
+    QTimer bannerTimer;
+    QToolButton *chips[STATE_COUNT] = {};
     QSystemTrayIcon tray;
     QMediaPlayer *player;
     QAudioOutput *audio;
@@ -173,6 +182,9 @@ private:
     bool editServer(ServerConf &s, const QStringList &taken, const QString &title);
     void updateTray(State worst, const int counts[STATE_COUNT]);
     void updateEmptyHint();
+    void showBanner(const QString &text, bool error = false);
+    void showOnlyState(State st);
+    bool lastErrorFree() const;  // no server reports an error
     bool confirmClose();  // false = keep the window open
     void quit();
     bool quitting = false;
