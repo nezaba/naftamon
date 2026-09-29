@@ -10,11 +10,11 @@
 #include <QTimer>
 #include <memory>
 
-// Same query strings as Nagstamon's Thruk.py (host section 5 fixed: Nagstamon has a
-// "dfl_s5_hostprop" typo, which makes Thruk return every host).
+// Nagstamon's Thruk.py queries, lighter: Nagstamon also ORs in every host in downtime, acknowledged,
+// soft, with notifications or checks disabled (thousands on big setups, re-parsed every poll) only to
+// know the flags of hosts with problem services. Those come with each service row instead (host_*).
 static const char HOSTS_QUERY[] =
-    "/status.cgi?hostgroup=all&style=hostdetail&dfl_s0_hoststatustypes=12&dfl_s1_hostprops=1"
-    "&dfl_s2_hostprops=4&dfl_s3_hostprops=524288&dfl_s4_hostprops=4096&dfl_s5_hostprops=16"
+    "/status.cgi?hostgroup=all&style=hostdetail&hoststatustypes=12"
     "&view_mode=json&entries=all&columns=name,state,last_check,last_state_change,plugin_output,"
     "current_attempt,max_check_attempts,active_checks_enabled,notifications_enabled,is_flapping,"
     "acknowledged,scheduled_downtime_depth,state_type,host_display_name,display_name";
@@ -22,7 +22,8 @@ static const char SERVICES_QUERY[] =
     "/status.cgi?host=all&servicestatustypes=28&view_mode=json&entries=all&columns=host_name,"
     "description,state,last_check,last_state_change,plugin_output,current_attempt,max_check_attempts,"
     "active_checks_enabled,is_flapping,notifications_enabled,acknowledged,state_type,"
-    "scheduled_downtime_depth,host_display_name,display_name";
+    "scheduled_downtime_depth,host_display_name,display_name,host_state,host_acknowledged,"
+    "host_scheduled_downtime_depth,host_is_flapping,host_active_checks_enabled";
 
 static const int POLL_TIMEOUT_MS = 20000;
 static const int CMD_TIMEOUT_MS = 30000;      // Thruk may hold a command up to wait_timeout (default 10s)
@@ -86,6 +87,11 @@ bool parseStatusJson(const QByteArray &json, bool isHost, const QString &server,
             i.service = displayName ? o["display_name"].toString() : i.realService;
             i.state = st == 1 ? WARNING : st == 2 ? CRITICAL : st == 3 ? UNKNOWN : UP;
             if (i.state == UP) continue;  // servicestatustypes=28 never returns OK, be safe anyway
+            int hs = int(num(o["host_state"]));
+            i.hostInfo = {num(o["host_acknowledged"]) != 0, num(o["host_scheduled_downtime_depth"]) != 0,
+                          num(o["host_is_flapping"]) != 0,
+                          o.contains("host_active_checks_enabled") && num(o["host_active_checks_enabled"]) == 0,
+                          hs == 1 ? DOWN : hs == 2 ? UNREACHABLE : UP};
         }
         i.hard = num(o["state_type"]) == 1;
         i.lastCheck = num(o["last_check"]);
@@ -240,16 +246,23 @@ void ThrukServer::finishPoll(QNetworkReply *h, QNetworkReply *s, qint64 started)
     hasData = true;
     reloginTried = false;
     // drop "rechecking" marks whose result is in this data: newer last_check, recovered (gone),
-    // or seen done by followUp() before this poll started
-    QHash<QString, qint64> seen;
-    for (const auto *list : {&raw.hosts, &raw.services})
-        for (const Item &i : *list) seen.insert(i.key(), i.lastCheck);
-    for (auto it = pending.begin(); it != pending.end();) {
-        auto lc = seen.find(it.key());
-        bool resolved = lc == seen.end() || lc.value() > it->item.lastCheck || (it->doneAtMs && it->doneAtMs <= started);
-        it = resolved ? pending.erase(it) : std::next(it);
+    // or seen done by followUp() before this poll started. Only rows of hosts with a pending
+    // recheck are looked at (a full index of every row per poll was a CPU hotspot on big setups).
+    if (!pending.isEmpty()) {
+        QSet<QString> hosts, unchanged;  // unchanged: pending items still listed with the old last_check
+        for (const Pending &p : pending) hosts.insert(p.item.host);
+        for (const auto *list : {&raw.hosts, &raw.services})
+            for (const Item &i : *list) {
+                if (!hosts.contains(i.host)) continue;
+                auto p = pending.constFind(i.key());
+                if (p != pending.cend() && i.lastCheck <= p->item.lastCheck) unchanged.insert(p.key());
+            }
+        for (auto it = pending.begin(); it != pending.end();) {
+            bool resolved = !unchanged.contains(it.key()) || (it->doneAtMs && it->doneAtMs <= started);
+            it = resolved ? pending.erase(it) : std::next(it);
+        }
+        if (pending.isEmpty()) followTimer.stop();
     }
-    if (pending.isEmpty()) followTimer.stop();
     done();
 }
 

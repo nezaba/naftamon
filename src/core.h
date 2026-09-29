@@ -11,6 +11,9 @@
 enum State { UP = 0, UNKNOWN, WARNING, CRITICAL, UNREACHABLE, DOWN, STATE_COUNT };
 QString stateName(State s);
 
+// state and flags of a service's host (from the service row: host_state, host_acknowledged, ...)
+struct HostFlags { bool ack = false, downtime = false, flapping = false, passive = false; State state = UP; };
+
 struct Item {
     QString server, host, service;  // service empty => host item
     QString realService;            // service description sent in commands (differs if display name used)
@@ -20,6 +23,7 @@ struct Item {
     int attempt = 0, maxAttempts = 0;
     QString output;
     bool ack = false, downtime = false, flapping = false, passive = false, notifDisabled = false;
+    HostFlags hostInfo;  // services only
     // flags of the service's host (Nagstamon's host_flags column), empty for host items
     QString hostFlags;
 
@@ -53,12 +57,9 @@ struct Filters {
     RegexFilter reHost, reService, reInfo, reDuration, reAttempt;
 };
 
-struct HostFlags { bool ack = false, downtime = false, flapping = false, passive = false; State state = UP; };
-
-// Result of one poll of one server: raw host rows (problems plus hosts with special props)
-// and raw service problem rows.
+// Result of one poll of one server: DOWN/UNREACHABLE host rows and service problem rows.
 struct RawStatus {
-    QVector<Item> hosts;     // may contain UP hosts (only carry flags for their services)
+    QVector<Item> hosts;
     QVector<Item> services;
 };
 

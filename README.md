@@ -55,7 +55,9 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 ## Deliberate differences
 
 * Service "flapping" uses Thruk's `is_flapping` (Nagstamon uses `notifications_enabled` there, a bug).
-* Host query: Nagstamon's `dfl_s5_hostprop=16` typo fixed to `hostprops`.
+* Host query: only DOWN/UNREACHABLE hosts (`hoststatustypes=12`). Nagstamon also ORs in every host in downtime,
+  acknowledged, soft or with notifications/checks disabled (thousands on big setups, every poll); the flags of a
+  problem service's host come with the service row instead (`host_state`, `host_acknowledged`, ...).
 * Sound repeat actually repeats (Nagstamon's repeat condition can never be true).
 * OK action runs when a server recovers to all-OK, not on every refresh.
 * All servers in one table with a Server column (shown when more than one server).

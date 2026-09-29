@@ -26,10 +26,7 @@ QString humanDuration(qint64 since, qint64 now) {
 
 QVector<Item> applyFilters(const RawStatus &raw, const Filters &f, qint64 now) {
     QVector<Item> out;
-    QHash<QString, HostFlags> hostInfo;
-
     for (const Item &h : raw.hosts) {
-        hostInfo.insert(h.host, {h.ack, h.downtime, h.flapping, h.passive, h.state});
         if (h.state == UP) continue;
         bool hide = (h.ack && f.acknowledged) || (h.notifDisabled && f.notificationsDisabled) ||
                     (h.passive && f.checksDisabled) || (h.downtime && f.downtime) ||
@@ -40,7 +37,7 @@ QVector<Item> applyFilters(const RawStatus &raw, const Filters &f, qint64 now) {
     }
 
     for (Item s : raw.services) {
-        HostFlags hf = hostInfo.value(s.host);  // hosts not returned are UP without flags
+        const HostFlags &hf = s.hostInfo;
         QString attempt = QString("%1/%2").arg(s.attempt).arg(s.maxAttempts);
         bool hide = (s.ack && f.acknowledged) || (s.notifDisabled && f.notificationsDisabled) ||
                     (s.passive && f.checksDisabled) || (s.downtime && f.downtime) ||

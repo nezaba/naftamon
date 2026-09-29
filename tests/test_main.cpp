@@ -30,14 +30,18 @@ static void coreTests() {
 
     RawStatus raw;
     Item down; down.server = "s"; down.host = "h1"; down.state = DOWN; down.ack = true;
-    Item upDowntime; upDowntime.server = "s"; upDowntime.host = "h2"; upDowntime.state = UP; upDowntime.downtime = true;
-    raw.hosts = {down, upDowntime};
+    raw.hosts = {down};
     Item soft = svc("h3", "load", WARNING); soft.hard = false;
-    raw.services = {svc("h1", "disk", CRITICAL), svc("h2", "http", CRITICAL), soft};
+    Item onDown = svc("h1", "disk", CRITICAL);
+    onDown.hostInfo.state = DOWN;  // host flags arrive with the service row (host_* columns)
+    onDown.hostInfo.ack = true;
+    Item onDowntime = svc("h2", "http", CRITICAL);
+    onDowntime.hostInfo.downtime = true;  // UP host in downtime
+    raw.services = {onDown, onDowntime, soft};
 
     Filters f;
     QVector<Item> v = applyFilters(raw, f, 0);
-    CHECK(v.size() == 4);  // UP host not listed
+    CHECK(v.size() == 4);
     CHECK(v[1].hostFlags == "A");
     CHECK(worstState(v) == DOWN);
 

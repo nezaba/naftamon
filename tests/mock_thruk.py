@@ -2,7 +2,7 @@
 """Minimal Thruk imitation for tests: cookie login, status.cgi JSON, cmd.cgi form + CSRF,
 and the use_wait_feature behaviour (POST with json=1 blocks until the recheck has run).
 
-usage: mock_thruk.py PORT [--no-wait] [--basic]   (user admin / password secret)
+usage: mock_thruk.py PORT [--no-wait] [--basic] [--big N]   (user admin / password secret)
 --basic: every request needs a Basic Authorization header; 401 without a challenge otherwise
 """
 import json, sys, threading, time, urllib.parse
@@ -21,7 +21,9 @@ def svc(host, desc, state, **kw):
     d = dict(host_name=host, description=desc, display_name=desc, state=state, last_check=now() - 30,
              last_state_change=now() - 3700, plugin_output=f'{desc} output', current_attempt=3,
              max_check_attempts=3, active_checks_enabled=1, is_flapping=0, notifications_enabled=1,
-             acknowledged=0, state_type=1, scheduled_downtime_depth=0, host_display_name=host)
+             acknowledged=0, state_type=1, scheduled_downtime_depth=0, host_display_name=host,
+             host_state=0, host_acknowledged=0, host_scheduled_downtime_depth=0, host_is_flapping=0,
+             host_active_checks_enabled=1)
     d.update(kw)
     return d
 
@@ -36,6 +38,13 @@ services = {
     ('db01', 'load'): svc('db01', 'load', 1, state_type=0, current_attempt=1),
     ('app01', 'http'): svc('app01', 'http', 3, acknowledged=1),
 }
+
+# --big N: add N problem services on N/10 hosts (performance tests)
+if '--big' in sys.argv:
+    n = int(sys.argv[sys.argv.index('--big') + 1])
+    for i in range(n):
+        h = f'bighost{i // 10:05d}.example.com'
+        services[(h, f'svc{i % 10}')] = svc(h, f'svc{i % 10}', 1 + i % 3)
 
 def run_check(key, is_host):
     time.sleep(CHECK_DELAY)
@@ -91,7 +100,8 @@ class H(BaseHTTPRequestHandler):
                 else:
                     stats['full'] += 1
                     if q.get('style') == ['hostdetail']:
-                        data = [h for h in hosts.values() if h['state'] != 0 or h['acknowledged'] or h['scheduled_downtime_depth']]
+                        assert q.get('hoststatustypes') == ['12']
+                        data = [h for h in hosts.values() if h['state'] != 0]
                     else:
                         data = [s for s in services.values() if s['state'] != 0]
                 return self.send(200, json.dumps(data), 'application/json')
