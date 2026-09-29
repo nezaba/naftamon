@@ -484,7 +484,8 @@ void StatusBar::mouseReleaseEvent(QMouseEvent *e) {
 
 // ---------------------------------------------------------------- app icon
 
-// Big "N" in front of a flame, drawn with QPainter (no SVG module needed). Coordinates are 0..100.
+// Big "N" on a red jerrycan ("nafta" = fuel), drawn with QPainter (no SVG module needed).
+// Coordinates are 0..100.
 QPixmap appIconPixmap(int size) {
     QPixmap pm(size, size);
     pm.fill(Qt::transparent);
@@ -499,40 +500,46 @@ QPixmap appIconPixmap(int size) {
     p.setBrush(bg);
     p.drawRoundedRect(QRectF(2, 2, 96, 96), 22, 22);
 
-    QPainterPath outer;  // flame: wide base, licks up on the left, main tip upper middle-right
-    outer.moveTo(50, 95);
-    outer.cubicTo(24, 95, 12, 78, 16, 60);
-    outer.cubicTo(19, 47, 28, 42, 28, 28);
-    outer.cubicTo(37, 35, 40, 44, 39, 51);
-    outer.cubicTo(43, 36, 52, 26, 50, 7);
-    outer.cubicTo(66, 19, 76, 35, 75, 51);
-    outer.cubicTo(79, 46, 80, 40, 78, 33);
-    outer.cubicTo(88, 44, 90, 62, 86, 74);
-    outer.cubicTo(82, 88, 68, 95, 50, 95);
-    QLinearGradient fire(0, 95, 0, 7);
-    fire.setColorAt(0, QColor("#d7261e"));
-    fire.setColorAt(0.55, QColor("#f2651c"));
-    fire.setColorAt(1, QColor("#ffb321"));
-    p.setBrush(fire);
-    p.drawPath(outer);
+    const QColor dark("#8e1414");
+    // carry handle: top bar with three posts
+    p.setBrush(dark);
+    p.drawRoundedRect(QRectF(46, 12, 32, 5.5), 2.75, 2.75);
+    for (double x : {46.0, 59.75, 73.5}) p.drawRoundedRect(QRectF(x, 12, 4.5, 16), 2.25, 2.25);
 
-    QPainterPath inner;
-    inner.moveTo(50, 93);
-    inner.cubicTo(36, 93, 29, 83, 31, 72);
-    inner.cubicTo(33, 63, 40, 59, 42, 50);
-    inner.cubicTo(47, 56, 48, 61, 48, 66);
-    inner.cubicTo(53, 57, 57, 49, 56, 40);
-    inner.cubicTo(65, 50, 71, 62, 69, 75);
-    inner.cubicTo(67, 87, 59, 93, 50, 93);
-    QLinearGradient core(0, 93, 0, 40);
-    core.setColorAt(0, QColor("#ff9a1f"));
-    core.setColorAt(1, QColor("#ffe45c"));
-    p.setBrush(core);
-    p.drawPath(inner);
+    // spout cap on the chamfered corner
+    p.save();
+    p.translate(27, 24);
+    p.rotate(-45);
+    p.setBrush(QColor("#5f6b73"));
+    p.drawRoundedRect(QRectF(-7, -5, 14, 10), 2.5, 2.5);
+    p.setBrush(QColor("#3c464d"));
+    p.drawRect(QRectF(-7, 1.5, 14, 2));
+    p.restore();
 
-    const QPointF n[] = {{29, 88}, {29, 40}, {40, 40}, {60, 71}, {60, 40}, {71, 40},
-                         {71, 88}, {60, 88}, {40, 57}, {40, 88}};
-    p.setPen(QPen(QColor("#15161b"), 3.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    // can body, top-left corner cut
+    QPainterPath body;
+    body.moveTo(36, 26);
+    body.lineTo(76, 26);
+    body.quadTo(84, 26, 84, 34);
+    body.lineTo(84, 84);
+    body.quadTo(84, 92, 76, 92);
+    body.lineTo(24, 92);
+    body.quadTo(16, 92, 16, 84);
+    body.lineTo(16, 46);
+    body.closeSubpath();
+    QLinearGradient red(16, 0, 84, 0);
+    red.setColorAt(0, QColor("#ef4a3f"));
+    red.setColorAt(1, QColor("#c62323"));
+    p.setBrush(red);
+    p.drawPath(body);
+    // pressed-in side panel
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(QColor(0, 0, 0, 55), 2));
+    p.drawRoundedRect(QRectF(24, 36, 52, 48), 5, 5);
+
+    const QPointF n[] = {{33, 78}, {33, 42}, {42, 42}, {58, 66}, {58, 42}, {67, 42},
+                         {67, 78}, {58, 78}, {42, 54}, {42, 78}};
+    p.setPen(QPen(QColor("#15161b"), 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.setBrush(QColor("#ffffff"));
     p.drawPolygon(n, 10);
     return pm;
