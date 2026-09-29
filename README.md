@@ -65,3 +65,14 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 
 Other monitor types (Icinga, Checkmk, Zabbix…), browser/URL-type custom actions, $ADDRESS$ placeholder, proxies, system keyring,
 autologin key, hover-to-open popup, fullscreen / windowed mode, color customization, hostgroup filter. On Wayland the compositor decides window positions (status bar can still be dragged).
+
+## License
+
+Copyright (C) 2026 nezaba
+
+naftamon is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any
+later version. See [LICENSE](LICENSE).
+
+naftamon reimplements the behaviour of [Nagstamon](https://github.com/HenriWahl/Nagstamon) (GPL-2.0-or-later);
+it contains no Nagstamon code.

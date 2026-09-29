@@ -16,12 +16,15 @@ class QLineEdit;
 
 QColor stateBg(State s);
 QColor stateFg(State s);
+QPixmap appIconPixmap(int size);
 
 // Nagstamon-style custom action: shell command with $HOST$, $SERVICE$, $STATUS-INFO$, $USERNAME$, $SERVER$
 struct CustomAction {
     QString name, command;
     bool terminal = true;  // run inside a terminal emulator (needed for ssh)
 };
+
+enum CloseAction { CloseAsk = 0, CloseMinimize = 1, CloseQuit = 2 };
 
 struct AppConfig {
     QVector<ServerConf> servers;
@@ -38,12 +41,14 @@ struct AppConfig {
     bool ackExpire = false;  // Nagstamon defaults_acknowledge_expire*
     int ackExpireHours = 2, ackExpireMinutes = 0;
     bool highlightNew = true;  // Nagstamon highlight_new_events
+    bool startMaximized = true;
+    int closeAction = 0;       // CloseAsk / CloseMinimize / CloseQuit
     QVector<CustomAction> customActions{{"SSH", "ssh $HOST$", true}};
     QString ackComment = "acknowledged", dtComment = "scheduled downtime";
     int dtHours = 2, dtMinutes = 0;
     bool dtFixed = true;
     QPoint barPos{-1, -1};
-    QByteArray windowGeometry;
+    QByteArray windowGeometry, headerState;
 
     static QString path();
     void load();
@@ -105,6 +110,7 @@ private:
     QTableView *view;
     QLabel *serverLine;
     QLineEdit *search;
+    QLabel *emptyHint;
     QSystemTrayIcon tray;
     QMediaPlayer *player;
     QAudioOutput *audio;
@@ -135,4 +141,8 @@ private:
     void settingsDialog();
     bool editServer(ServerConf &s);
     void updateTray(State worst, const int counts[STATE_COUNT]);
+    void updateEmptyHint();
+    bool confirmClose();  // false = keep the window open
+    void quit();
+    bool quitting = false;
 };

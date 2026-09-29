@@ -10,6 +10,12 @@ int main(int argc, char **argv) {
     app.setApplicationName("naftamon");
     app.setDesktopFileName("naftamon");
     app.setQuitOnLastWindowClosed(false);  // lives in the tray / status bar
+    app.setWindowIcon(QIcon(appIconPixmap(256)));
+
+    // naftamon --export-icon FILE.png [SIZE]: used by install.sh for the desktop entry
+    QStringList args = app.arguments();
+    if (args.size() >= 3 && args[1] == "--export-icon")
+        return appIconPixmap(args.size() > 3 ? args[3].toInt() : 256).save(args[2]) ? 0 : 1;
 
     // one instance per config file: a second one would poll and notify twice
     QString id = QCryptographicHash::hash(AppConfig::path().toUtf8(), QCryptographicHash::Md5).toHex().left(8);

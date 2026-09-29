@@ -26,6 +26,7 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QProcess>
 #include <QPushButton>
 #include <QRadioButton>
@@ -37,6 +38,7 @@
 #include <QTabWidget>
 #include <QTableView>
 #include <QTableWidget>
+#include <QToolButton>
 #include <QWindow>
 #include <QtMath>
 
@@ -103,6 +105,7 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
         {"downtime_fixed", &c.dtFixed},
         {"ack_expire", &c.ackExpire},
         {"highlight_new_events", &c.highlightNew},
+        {"start_maximized", &c.startMaximized},
     };
 }
 
@@ -132,6 +135,8 @@ void AppConfig::load() {
     dtMinutes = s.value("downtime_minutes", dtMinutes).toInt();
     barPos = s.value("bar_pos", barPos).toPoint();
     windowGeometry = s.value("window_geometry").toByteArray();
+    headerState = s.value("table_header").toByteArray();
+    closeAction = qBound(0, s.value("close_action", closeAction).toInt(), 2);
     ackExpireHours = s.value("ack_expire_hours", ackExpireHours).toInt();
     ackExpireMinutes = s.value("ack_expire_minutes", ackExpireMinutes).toInt();
     if (s.contains("custom_actions/size")) {  // absent: keep the default SSH action
@@ -189,6 +194,8 @@ void AppConfig::save() const {
     s.setValue("downtime_minutes", dtMinutes);
     s.setValue("bar_pos", barPos);
     s.setValue("window_geometry", windowGeometry);
+    s.setValue("table_header", headerState);
+    s.setValue("close_action", closeAction);
     s.setValue("ack_expire_hours", ackExpireHours);
     s.setValue("ack_expire_minutes", ackExpireMinutes);
     s.remove("custom_actions");
@@ -348,6 +355,62 @@ void StatusBar::mouseReleaseEvent(QMouseEvent *e) {
     dragging = false;
 }
 
+// ---------------------------------------------------------------- app icon
+
+// Big "N" in front of a flame, drawn with QPainter (no SVG module needed). Coordinates are 0..100.
+QPixmap appIconPixmap(int size) {
+    QPixmap pm(size, size);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.scale(size / 100.0, size / 100.0);
+
+    QLinearGradient bg(0, 0, 0, 100);
+    bg.setColorAt(0, QColor("#2c2f3a"));
+    bg.setColorAt(1, QColor("#121318"));
+    p.setPen(Qt::NoPen);
+    p.setBrush(bg);
+    p.drawRoundedRect(QRectF(2, 2, 96, 96), 22, 22);
+
+    QPainterPath outer;  // flame: wide base, licks up on the left, main tip upper middle-right
+    outer.moveTo(50, 95);
+    outer.cubicTo(24, 95, 12, 78, 16, 60);
+    outer.cubicTo(19, 47, 28, 42, 28, 28);
+    outer.cubicTo(37, 35, 40, 44, 39, 51);
+    outer.cubicTo(43, 36, 52, 26, 50, 7);
+    outer.cubicTo(66, 19, 76, 35, 75, 51);
+    outer.cubicTo(79, 46, 80, 40, 78, 33);
+    outer.cubicTo(88, 44, 90, 62, 86, 74);
+    outer.cubicTo(82, 88, 68, 95, 50, 95);
+    QLinearGradient fire(0, 95, 0, 7);
+    fire.setColorAt(0, QColor("#d7261e"));
+    fire.setColorAt(0.55, QColor("#f2651c"));
+    fire.setColorAt(1, QColor("#ffb321"));
+    p.setBrush(fire);
+    p.drawPath(outer);
+
+    QPainterPath inner;
+    inner.moveTo(50, 93);
+    inner.cubicTo(36, 93, 29, 83, 31, 72);
+    inner.cubicTo(33, 63, 40, 59, 42, 50);
+    inner.cubicTo(47, 56, 48, 61, 48, 66);
+    inner.cubicTo(53, 57, 57, 49, 56, 40);
+    inner.cubicTo(65, 50, 71, 62, 69, 75);
+    inner.cubicTo(67, 87, 59, 93, 50, 93);
+    QLinearGradient core(0, 93, 0, 40);
+    core.setColorAt(0, QColor("#ff9a1f"));
+    core.setColorAt(1, QColor("#ffe45c"));
+    p.setBrush(core);
+    p.drawPath(inner);
+
+    const QPointF n[] = {{29, 88}, {29, 40}, {40, 40}, {60, 71}, {60, 40}, {71, 40},
+                         {71, 88}, {60, 88}, {40, 57}, {40, 88}};
+    p.setPen(QPen(QColor("#15161b"), 3.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(QColor("#ffffff"));
+    p.drawPolygon(n, 10);
+    return pm;
+}
+
 // ---------------------------------------------------------------- sound
 
 // Built-in tones (Nagstamon ships .wav files; these are generated instead).
@@ -390,17 +453,36 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
     window = new QWidget;
     window->setWindowTitle("naftamon");
     auto *v = new QVBoxLayout(window);
+    v->setContentsMargins(6, 6, 6, 4);
+    v->setSpacing(4);
+
+    // toolbar: compact search on the left, flat buttons with desktop-theme icons on the right
     auto *top = new QHBoxLayout;
-    serverLine = new QLabel;
-    serverLine->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    auto *refreshBtn = new QPushButton("Refresh");
-    auto *recheckAllBtn = new QPushButton("Recheck all");
-    auto *settingsBtn = new QPushButton("Settings");
-    top->addWidget(serverLine, 1);
-    top->addWidget(refreshBtn);
-    top->addWidget(recheckAllBtn);
-    top->addWidget(settingsBtn);
+    search = new QLineEdit;
+    search->setPlaceholderText("Search host, service, output…");
+    search->setToolTip("Filter the list by host, service, status or output (Ctrl+F, Esc clears)");
+    search->setClearButtonEnabled(true);
+    QIcon findIcon = QIcon::fromTheme("edit-find", QIcon::fromTheme("system-search"));
+    if (!findIcon.isNull()) search->addAction(findIcon, QLineEdit::LeadingPosition);
+    search->setFixedWidth(search->fontMetrics().horizontalAdvance('x') * 32);
+    top->addWidget(search);
+    top->addStretch();
+    auto tool = [&](const char *icon, const QString &text, const QString &tip) {
+        auto *b = new QToolButton;
+        b->setIcon(QIcon::fromTheme(icon));
+        b->setText(text);
+        b->setToolTip(tip);
+        b->setAutoRaise(true);
+        b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        top->addWidget(b);
+        return b;
+    };
+    auto *refreshBtn = tool("view-refresh", "Refresh", "Poll all servers now (F5)");
+    auto *recheckAllBtn = tool("system-run", "Recheck all", "Recheck every listed problem");
+    auto *settingsBtn = tool("configure", "Settings", "Servers, filters, notifications, actions");
+    if (settingsBtn->icon().isNull()) settingsBtn->setIcon(QIcon::fromTheme("preferences-system"));
     v->addLayout(top);
+
     view = new QTableView;
     view->setModel(proxy);
     view->setSortingEnabled(true);
@@ -410,17 +492,46 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
     view->setEditTriggers(QAbstractItemView::NoEditTriggers);
     view->setWordWrap(false);
     view->setContextMenuPolicy(Qt::CustomContextMenu);
+    view->setFrameShape(QFrame::NoFrame);
     view->verticalHeader()->hide();
-    view->verticalHeader()->setDefaultSectionSize(view->fontMetrics().height() + 6);
-    view->horizontalHeader()->setStretchLastSection(true);
-    search = new QLineEdit;
-    search->setPlaceholderText("Search host, service, status information…  (Ctrl+F, Esc clears)");
-    search->setClearButtonEnabled(true);
+    view->verticalHeader()->setDefaultSectionSize(view->fontMetrics().height() + 8);
+    auto *hh = view->horizontalHeader();
+    hh->setStretchLastSection(true);
+    hh->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    hh->setHighlightSections(false);
+    // fixed starting widths from the font (ResizeToContents would measure every row on each refresh)
+    const QFontMetrics fm = view->fontMetrics();
+    const std::pair<int, const char *> widths[] = {
+        {StatusModel::Server, "server-name"}, {StatusModel::Host, "host-name.example.com"},
+        {StatusModel::Service, "service description"}, {StatusModel::Status, "UNREACHABLE  ⟳ rech"},
+        {StatusModel::LastCheck, "2026-01-01 00:00:00"}, {StatusModel::Duration, "10d 23h 59m 59s"},
+        {StatusModel::Attempt, "Attempt"}};
+    for (auto [col, sample] : widths) view->setColumnWidth(col, fm.horizontalAdvance(sample) + 24);
+    if (!cfg.headerState.isEmpty()) hh->restoreState(cfg.headerState);
     proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     proxy->setFilterKeyColumn(-1);  // any column
-    connect(search, &QLineEdit::textChanged, proxy, &QSortFilterProxyModel::setFilterFixedString);
-    v->addWidget(search);
-    v->addWidget(view);
+    connect(search, &QLineEdit::textChanged, this, [this](const QString &t) {
+        proxy->setFilterFixedString(t);
+        updateEmptyHint();
+    });
+    v->addWidget(view, 1);
+
+    // shown over the empty table
+    emptyHint = new QLabel(view->viewport());
+    emptyHint->setAlignment(Qt::AlignCenter);
+    emptyHint->setAttribute(Qt::WA_TransparentForMouseEvents);
+    auto *vl = new QVBoxLayout(view->viewport());
+    vl->addWidget(emptyHint);
+
+    // per-server state, small and muted at the bottom
+    serverLine = new QLabel;
+    serverLine->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    QFont small = serverLine->font();
+    small.setPointSizeF(small.pointSizeF() * 0.9);
+    serverLine->setFont(small);
+    serverLine->setForegroundRole(QPalette::PlaceholderText);
+    v->addWidget(serverLine);
+
     auto *find = new QShortcut(QKeySequence::Find, window);
     connect(find, &QShortcut::activated, search, [this] { search->setFocus(); search->selectAll(); });
     auto *clear = new QShortcut(QKeySequence(Qt::Key_Escape), search);
@@ -430,9 +541,9 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
     window->resize(1100, 450);
     if (!cfg.windowGeometry.isEmpty()) window->restoreGeometry(cfg.windowGeometry);
 
-    connect(refreshBtn, &QPushButton::clicked, this, [this] { for (auto *s : servers) s->refresh(); });
-    connect(recheckAllBtn, &QPushButton::clicked, this, [this] { recheck(model.items); });
-    connect(settingsBtn, &QPushButton::clicked, this, &App::settingsDialog);
+    connect(refreshBtn, &QToolButton::clicked, this, [this] { for (auto *s : servers) s->refresh(); });
+    connect(recheckAllBtn, &QToolButton::clicked, this, [this] { recheck(model.items); });
+    connect(settingsBtn, &QToolButton::clicked, this, &App::settingsDialog);
     connect(view, &QTableView::customContextMenuRequested, this, &App::contextMenu);
     connect(view, &QTableView::doubleClicked, this, [this] {
         for (const Item &i : selectedItems())
@@ -456,7 +567,7 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
     menu->addAction("Refresh", this, [this] { for (auto *s : servers) s->refresh(); });
     menu->addAction("Settings…", this, &App::settingsDialog);
     menu->addSeparator();
-    menu->addAction("Quit", qApp, &QApplication::quit);
+    menu->addAction("Quit", this, &App::quit);
     tray.setContextMenu(menu);
     connect(&tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason r) {
         if (r == QSystemTrayIcon::Trigger) toggleWindow();
@@ -473,10 +584,61 @@ App::App() : proxy(new QSortFilterProxyModel(this)) {
 
     applyConfig();
     if (cfg.servers.isEmpty()) QTimer::singleShot(0, this, &App::settingsDialog);
+
+    // development aid: NAFTAMON_SCREENSHOT=file.png renders the status window once and quits
+    QString shot = qEnvironmentVariable("NAFTAMON_SCREENSHOT");
+    if (!shot.isEmpty())
+        QTimer::singleShot(2500, this, [this, shot] {
+            window->show();
+            QTimer::singleShot(300, this, [this, shot] { window->grab().save(shot); quit(); });
+        });
+    else if (cfg.startMaximized)
+        window->showMaximized();
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { quitting = true; });
+}
+
+void App::quit() {
+    quitting = true;
+    qApp->quit();
+}
+
+// X on the status window: ask (or use the remembered choice) whether to keep running in the tray
+bool App::confirmClose() {
+    int choice = cfg.closeAction;
+    if (choice == CloseAsk) {
+        QMessageBox box(QMessageBox::Question, "naftamon", "Close naftamon or keep it running?",
+                        QMessageBox::NoButton, window);
+        box.setInformativeText("Minimized, naftamon keeps monitoring in the system tray.");
+        auto *min = box.addButton("Minimize to tray", QMessageBox::AcceptRole);
+        auto *quitBtn = box.addButton("Quit", QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(min);
+        auto *remember = new QCheckBox("Remember my choice (changeable in Settings → General)");
+        box.setCheckBox(remember);
+        box.exec();
+        if (box.clickedButton() == min) choice = CloseMinimize;
+        else if (box.clickedButton() == quitBtn) choice = CloseQuit;
+        else return false;  // cancel: keep the window
+        if (remember->isChecked()) {
+            cfg.closeAction = choice;
+            cfg.save();
+        }
+    }
+    if (choice == CloseQuit) {
+        QTimer::singleShot(0, this, &App::quit);
+        return true;
+    }
+    // minimize: hide to the tray; without a tray or status bar there is nothing to come back to
+    if (!QSystemTrayIcon::isSystemTrayAvailable() && !bar->isVisible()) {
+        window->showMinimized();
+        return false;
+    }
+    return true;
 }
 
 App::~App() {
     cfg.windowGeometry = window->saveGeometry();
+    cfg.headerState = view->horizontalHeader()->saveState();
     if (QGuiApplication::platformName() != "wayland") cfg.barPos = bar->pos();
     cfg.save();
     delete bar;
@@ -553,9 +715,9 @@ void App::rebuild(ThrukServer *updated) {
             notifyChange(diff, w, prevWorst);
         }
         anyError |= !s->error.isEmpty();
-        lines << s->conf.name + ": " +
-                     (s->error.isEmpty() ? (s->hasData ? QString("OK (%1 ms)").arg(s->lastRefreshMs) : "connecting…")
-                                         : "ERROR " + s->error);
+        lines << (s->error.isEmpty() ? "● " : "✖ ") + s->conf.name + "  " +
+                     (s->error.isEmpty() ? (s->hasData ? QString("%1 ms").arg(s->lastRefreshMs) : "connecting…")
+                                         : s->error);
         for (const Item &i : vis) counts[i.state]++;
         all += vis;
     }
@@ -589,11 +751,12 @@ void App::rebuild(ThrukServer *updated) {
         view->selectionModel()->select(sel, QItemSelectionModel::Select | QItemSelectionModel::Rows);
     }
 
+    updateEmptyHint();
     bar->setCounts(counts, anyError);
     State worst = worstState(all);
     updateTray(worst, counts);
-    QString line = lines.join("   ·   ") + "   ·   " + QDateTime::currentDateTime().toString("HH:mm:ss");
-    if (!lastError.isEmpty()) line += "   ·   last command error: " + lastError;
+    QString line = lines.join("     ") + "     updated " + QDateTime::currentDateTime().toString("HH:mm:ss");
+    if (!lastError.isEmpty()) line += "     ⚠ last command error: " + lastError;
     serverLine->setText(line);
     if (worst == UP) stopNotifying();
 }
@@ -710,19 +873,21 @@ void App::contextMenu(const QPoint &pos) {
     QVector<Item> items = selectedItems();
     if (items.isEmpty()) return;
     QMenu m;
-    m.addAction("Monitor", [=] {
+    auto icon = [](const char *name) { return QIcon::fromTheme(name); };
+    m.addAction(icon("internet-web-browser"), "Monitor", [=] {
         for (const Item &i : items)
             if (auto *s = serverOf(i)) QDesktopServices::openUrl(s->monitorUrl(i));
     });
     for (const CustomAction &a : cfg.customActions)
-        m.addAction(a.name, [=] { for (const Item &i : items) runAction(a, i); });
-    m.addAction("Recheck\tR", [=] { recheck(items); });
-    m.addAction("Recheck all services on host", [=] { recheckHostServices(items); });
-    m.addAction("Acknowledge…\tA", [=] { acknowledgeDialog(items); });
-    m.addAction("Downtime…\tD", [=] { downtimeDialog(items); });
+        m.addAction(icon("utilities-terminal"), a.name, [=] { for (const Item &i : items) runAction(a, i); });
+    m.addSeparator();
+    m.addAction(icon("view-refresh"), "Recheck\tR", [=] { recheck(items); });
+    m.addAction(icon("view-refresh"), "Recheck all services on host", [=] { recheckHostServices(items); });
+    m.addAction(icon("dialog-ok-apply"), "Acknowledge…\tA", [=] { acknowledgeDialog(items); });
+    m.addAction(icon("appointment-new"), "Downtime…\tD", [=] { downtimeDialog(items); });
     if (items.size() == 1) m.addAction("Submit check result…", [=] { submitDialog(items[0]); });
     if (std::any_of(items.begin(), items.end(), [](const Item &i) { return i.ack; }))
-        m.addAction("Remove acknowledgement", [=] {
+        m.addAction(icon("edit-undo"), "Remove acknowledgement", [=] {
             for (const Item &i : items)
                 if (auto *s = serverOf(i); s && i.ack) s->removeAcknowledgement(i);
         });
@@ -771,7 +936,9 @@ void App::runAction(const CustomAction &a, const Item &i) {
         return;
     }
     // keep the window open when the command fails, so e.g. an ssh error can be read
-    QStringList run{"sh", "-c", cmd + " || { echo; echo \"[exit $?] press Enter to close\"; read _; }"};
+    // `trap : INT`: Ctrl+C stops the command (handlers reset on exec) but not this wrapper shell,
+    // so the terminal does not report "sh crashed" and still shows the message below
+    QStringList run{"sh", "-c", "trap : INT; " + cmd + " || { rc=$?; echo; echo \"[exit $rc] press Enter to close\"; read _; }"};
     QString env = qEnvironmentVariable("TERMINAL");
     if (!env.isEmpty() && !QStandardPaths::findExecutable(env).isEmpty()) {
         QProcess::startDetached(env, QStringList{"-e"} + run);
@@ -789,7 +956,21 @@ void App::runAction(const CustomAction &a, const Item &i) {
                      QSystemTrayIcon::Warning);
 }
 
+void App::updateEmptyHint() {
+    bool anyData = std::any_of(servers.begin(), servers.end(), [](ThrukServer *s) { return s->hasData; });
+    QString t = !search->text().isEmpty() && proxy->rowCount() == 0 ? "No matches"
+              : model.items.isEmpty() && anyData                   ? "✓  All OK — no problems"
+              : model.items.isEmpty()                              ? "Connecting…"
+                                                                   : QString();
+    emptyHint->setText(t);
+    emptyHint->setVisible(!t.isEmpty());
+}
+
 bool App::eventFilter(QObject *o, QEvent *e) {
+    if (o == window && e->type() == QEvent::Close && !quitting && !confirmClose()) {
+        e->ignore();
+        return true;
+    }
     if (o == window && e->type() == QEvent::Hide) {  // problems have been seen now
         for (bool &fresh : eventHistory) fresh = false;
         rebuild(nullptr);
@@ -1049,6 +1230,12 @@ void App::settingsDialog() {
     gf->addRow(new QLabel("Rechecks and other commands refresh immediately, independent of the interval."));
     gf->addRow(check("Show floating status bar", tmp.floatingBar));
     gf->addRow(check("Highlight new problems (bold, flag N) until the status window is closed", tmp.highlightNew));
+    gf->addRow(check("Open the status window maximized at start", tmp.startMaximized));
+    auto *closeBox = new QComboBox;
+    closeBox->addItems({"Ask", "Minimize to tray", "Quit"});
+    closeBox->setCurrentIndex(tmp.closeAction);
+    commit.append([&tmp, closeBox] { tmp.closeAction = closeBox->currentIndex(); });
+    gf->addRow("Closing the window (X):", closeBox);
     gf->addRow(new QLabel("Config file: " + AppConfig::path()));
     tabs->addTab(gen, "General");
 
