@@ -165,7 +165,8 @@ private:
     void contextMenu(const QPoint &pos);
     QVector<Item> selectedItems() const;
     ThrukServer *serverOf(const Item &i) const;
-    void recheck(const QVector<Item> &items);
+    void recheck(QVector<Item> items);
+    bool rebuildQueued = false;
     void recheckHostServices(const QVector<Item> &items);
     void runAction(const CustomAction &a, const Item &i);
     bool openInTerminal(const QString &cmd);

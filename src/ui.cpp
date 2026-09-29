@@ -908,7 +908,13 @@ void App::applyConfig() {
         }
         auto *s = new ThrukServer(c, this);
         connect(s, &ThrukServer::updated, this, [this, s] { rebuild(s); });
-        connect(s, &ThrukServer::recheckingChanged, this, [this] { rebuild(nullptr); });
+        connect(s, &ThrukServer::recheckingChanged, this, [this] {
+            // coalesced: "Recheck all" marks many rows at once. It also must not rebuild while the
+            // caller still iterates model.items (rebuild replaces that vector).
+            if (rebuildQueued) return;
+            rebuildQueued = true;
+            QTimer::singleShot(0, this, [this] { rebuildQueued = false; rebuild(nullptr); });
+        });
         connect(s, &ThrukServer::commandFailed, this, [this](const QString &msg) {
             lastError = msg;
             showBanner("Command failed: " + msg, true);
@@ -1138,7 +1144,7 @@ QVector<Item> App::selectedItems() const {
     return out;
 }
 
-void App::recheck(const QVector<Item> &items) {
+void App::recheck(QVector<Item> items) {  // by value: callers may pass model.items
     for (const Item &i : items)
         if (auto *s = serverOf(i)) s->recheck(i);
 }
