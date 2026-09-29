@@ -28,6 +28,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QProcess>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScreen>
@@ -1057,22 +1058,71 @@ void App::checkForUpdates() {
             QMessageBox::information(window, "Naftamon", "Naftamon is up to date (" + mine + ").");
             return;
         }
-        QJsonObject c = o["commit"].toObject();
-        QString text = QString("A newer version is available.\n\nInstalled:  %1\nLatest:      %2  (%3)\n\"%4\"\n\n"
-                               "Download, rebuild and restart Naftamon now?\nA terminal shows the progress; "
-                               "monitoring continues until the new version starts.")
-                           .arg(mine, latest, c["committer"].toObject()["date"].toString().left(10),
-                                c["message"].toString().section('\n', 0, 0));
-        if (QMessageBox::question(window, "Naftamon", text) != QMessageBox::Yes) return;
-        QString url = QString("https://github.com/%1/archive/refs/heads/main.tar.gz").arg(REPO);
-        QString cmd = QString("( set -e; d=\"$HOME/.cache/naftamon-update\"; rm -rf \"$d\"; mkdir -p \"$d\"; "
-                              "echo \"Downloading %1\"; { curl -fsSL %1 || wget -qO- %1; } | tar xz -C \"$d\"; "
-                              "NAFTAMON_COMMIT=%2 sh \"$d\"/naftamon-main/install.sh --update )")
-                          .arg(url, latest);  // latest is hex from GitHub, url is a constant
-        if (!openInTerminal(cmd))
-            QMessageBox::warning(window, "Naftamon", "No terminal emulator found (set $TERMINAL). Update manually:\n"
-                                                     "git pull && sh install.sh");
+        QString date = o["commit"].toObject()["committer"].toObject()["date"].toString().left(10);
+        if (QMessageBox::question(window, "Naftamon",
+                                  "A new version of Naftamon is available (" + date + ").\n\nUpdate and restart now?") ==
+            QMessageBox::Yes)
+            runUpdate(latest);
     });
+}
+
+// Download the repo archive, build and install it in the background with a progress dialog;
+// output is only shown when something fails. On success the new version is started.
+void App::runUpdate(const QString &latest) {
+    QString url = QString("https://github.com/%1/archive/refs/heads/main.tar.gz").arg(REPO);
+    QString cmd = QString("set -e; d=\"$HOME/.cache/naftamon-update\"; rm -rf \"$d\"; mkdir -p \"$d\"; "
+                          "{ curl -fsSL %1 || wget -qO- %1; } | tar xz -C \"$d\"; "
+                          "NAFTAMON_COMMIT=%2 sh \"$d\"/naftamon-main/install.sh --update --no-restart")
+                      .arg(url, latest);  // latest is hex from GitHub, url is a constant
+    auto *proc = new QProcess(this);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    auto *dlg = new QProgressDialog("Downloading…", "Cancel", 0, 0, window);  // 0,0 = busy until the build starts
+    dlg->setWindowTitle("Updating Naftamon");
+    dlg->setMinimumDuration(0);
+    dlg->setAutoClose(false);
+    dlg->setAutoReset(false);
+    dlg->setMinimumWidth(360);
+    auto log = std::make_shared<QByteArray>();
+    auto compiled = std::make_shared<int>(0);
+    connect(proc, &QProcess::readyRead, dlg, [=] {
+        while (proc->canReadLine()) {
+            QByteArray line = proc->readLine();
+            *log += line;
+            if (line.startsWith("@@build")) {
+                dlg->setRange(0, 100);
+                dlg->setLabelText("Building…");
+                dlg->setValue(10);
+            } else if (line.startsWith("@@install")) {
+                dlg->setLabelText("Installing…");
+                dlg->setValue(95);
+            } else if (line.contains(" -c ")) {  // one compiler call per source file (~6)
+                dlg->setValue(qMin(90, 10 + ++*compiled * 13));
+            }
+        }
+    });
+    connect(dlg, &QProgressDialog::canceled, proc, [proc] { proc->kill(); });
+    connect(proc, &QProcess::finished, this, [=](int code, QProcess::ExitStatus status) {
+        *log += proc->readAll();
+        bool canceled = dlg->wasCanceled();
+        dlg->deleteLater();
+        proc->deleteLater();
+        if (canceled) return;
+        if (status != QProcess::NormalExit || code != 0) {
+            QStringList lines = QString::fromUtf8(*log).trimmed().split('\n');
+            QMessageBox box(QMessageBox::Warning, "Naftamon", "The update failed; the current version keeps running.",
+                            QMessageBox::Ok, window);
+            box.setInformativeText(lines.mid(qMax(0, int(lines.size()) - 6)).join('\n'));
+            box.setDetailedText(QString::fromUtf8(*log));
+            box.exec();
+            return;
+        }
+        dlg->setValue(100);
+        // start the new binary once this process has exited (single-instance lock), then quit
+        QProcess::startDetached("/bin/sh", {"-c", "i=0; while pgrep -x naftamon >/dev/null && [ $i -lt 50 ]; do "
+                                                  "sleep 0.1; i=$((i + 1)); done; exec \"$HOME/.local/bin/naftamon\""});
+        quit();
+    });
+    proc->start("/bin/sh", {"-c", cmd});
 }
 
 void App::updateEmptyHint() {

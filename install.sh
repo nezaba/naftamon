@@ -3,7 +3,9 @@
 # binary in ~/.local/bin, entry + icon in the application launcher.
 #   sh install.sh              install / update
 #   sh install.sh --uninstall  remove binary, launcher entry and icon (settings are kept)
-#   sh install.sh --update     used by "Check for updates": skip dependencies if present, restart after
+#   sh install.sh --update [--no-restart]
+#                              used by "Check for updates": skip dependencies if present; without
+#                              --no-restart it also restarts Naftamon (older app versions rely on that)
 set -e
 cd "$(dirname "$0")"
 bin=~/.local/bin/naftamon
@@ -33,11 +35,13 @@ else
     echo "unsupported distro: install Qt6 base + multimedia dev packages and qmake6, then rerun" >&2
 fi
 rm -rf build && mkdir build && cd build
+echo "@@build"
 qmake6 ../naftamon.pro ${NAFTAMON_COMMIT:+NAFTAMON_COMMIT=$NAFTAMON_COMMIT} && make -j"$(nproc)"
 
-pkill -x naftamon || true  # replace a running copy
+echo "@@install"  # progress marker for the in-app updater
 mkdir -p ~/.local/bin "$apps" "$icons"
-cp naftamon "$bin"
+# never overwrite a running binary in place ("Text file busy"): write a new file, rename over the old
+install -m 755 naftamon "$bin.new" && mv -f "$bin.new" "$bin"
 QT_QPA_PLATFORM=offscreen ./naftamon --export-icon "$icons/naftamon.png" 256  # icon is drawn by naftamon
 cat > "$apps/naftamon.desktop" <<EOF
 [Desktop Entry]
@@ -54,6 +58,11 @@ StartupWMClass=naftamon
 EOF
 refresh_launcher
 echo "installed: $bin — search \"Naftamon\" in your application launcher"
+[ "$2" = "--no-restart" ] && exit 0  # the app restarts itself
+# stop a running copy (it still runs the old binary) and wait until it is gone
+if pkill -x naftamon; then
+    i=0; while pgrep -x naftamon >/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+fi
 if [ "$1" = "--update" ]; then
     setsid -f "$bin" >/dev/null 2>&1 </dev/null  # restart, detached from this terminal
     echo "Naftamon restarted"

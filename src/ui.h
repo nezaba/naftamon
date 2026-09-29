@@ -165,6 +165,7 @@ private:
     void runAction(const CustomAction &a, const Item &i);
     bool openInTerminal(const QString &cmd);
     void checkForUpdates();
+    void runUpdate(const QString &latestCommit);
     void acknowledgeDialog(const QVector<Item> &items);
     void downtimeDialog(const QVector<Item> &items);
     void submitDialog(const Item &item);
