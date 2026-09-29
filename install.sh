@@ -10,7 +10,8 @@ set -e
 cd "$(dirname "$0")"
 bin=~/.local/bin/naftamon
 apps=~/.local/share/applications
-icons=~/.local/share/icons/hicolor/256x256/apps
+icons=~/.local/share/icons/hicolor/256x256/apps  # used by older versions, cleaned up below
+data=~/.local/share/naftamon
 
 refresh_launcher() {
     command -v update-desktop-database >/dev/null && update-desktop-database -q "$apps" || true
@@ -19,7 +20,7 @@ refresh_launcher() {
 
 if [ "$1" = "--uninstall" ]; then
     pkill -x naftamon || true
-    rm -f "$bin" "$apps/naftamon.desktop" "$icons/naftamon.png"
+    rm -rf "$bin" "$apps/naftamon.desktop" "$icons/naftamon.png" "$data"
     refresh_launcher
     echo "removed (settings kept in ~/.config/naftamon)"
     exit 0
@@ -39,10 +40,16 @@ echo "@@build"
 qmake6 ../naftamon.pro ${NAFTAMON_COMMIT:+NAFTAMON_COMMIT=$NAFTAMON_COMMIT} && make -j"$(nproc)"
 
 echo "@@install"  # progress marker for the in-app updater
-mkdir -p ~/.local/bin "$apps" "$icons"
+mkdir -p ~/.local/bin "$apps" "$data"
 # never overwrite a running binary in place ("Text file busy"): write a new file, rename over the old
 install -m 755 naftamon "$bin.new" && mv -f "$bin.new" "$bin"
-QT_QPA_PLATFORM=offscreen ./naftamon --export-icon "$icons/naftamon.png" 256  # icon is drawn by naftamon
+# icon is drawn by naftamon; the file name carries a hash of its content so desktops that cache
+# icons (GNOME keeps them until logout) pick up a changed icon right away
+QT_QPA_PLATFORM=offscreen ./naftamon --export-icon "$data/icon.png" 256
+icon="$data/naftamon-$(md5sum "$data/icon.png" | cut -c1-8).png"
+find "$data" -name 'naftamon-*.png' ! -path "$icon" -delete
+mv -f "$data/icon.png" "$icon"
+rm -f "$icons/naftamon.png"
 cat > "$apps/naftamon.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -50,7 +57,7 @@ Name=Naftamon
 GenericName=Monitoring status
 Comment=Fast Thruk / Nagios status monitor (Nagstamon compatible)
 Exec=$bin
-Icon=naftamon
+Icon=$icon
 Terminal=false
 Categories=System;Monitor;
 Keywords=nagios;thruk;naemon;icinga;monitoring;nagstamon;alerts;
