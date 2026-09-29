@@ -1237,9 +1237,10 @@ void App::submitDialog(const Item &item) {
     if (auto *s = serverOf(item)) s->submitResult(item, state->currentIndex(), output->text(), perf->text());
 }
 
-bool App::editServer(ServerConf &s) {
+// taken: names of the other servers (a name identifies a server, so it must be unique)
+bool App::editServer(ServerConf &s, const QStringList &taken, const QString &title) {
     QDialog d(window);
-    d.setWindowTitle("Thruk server");
+    d.setWindowTitle(title);
     auto *f = new QFormLayout(&d);
     auto *name = new QLineEdit(s.name);
     auto *url = new QLineEdit(s.url);
@@ -1267,6 +1268,10 @@ bool App::editServer(ServerConf &s) {
     if (d.exec() != QDialog::Accepted) return false;
     if (name->text().trimmed().isEmpty() || url->text().trimmed().isEmpty()) {
         QMessageBox::warning(window, "Naftamon", "Name and URL are required.");
+        return false;
+    }
+    if (taken.contains(name->text().trimmed())) {
+        QMessageBox::warning(window, "Naftamon", "A server named \"" + name->text().trimmed() + "\" already exists.");
         return false;
     }
     s.name = name->text().trimmed();
@@ -1315,21 +1320,41 @@ void App::settingsDialog() {
     };
     refill();
     auto *btns = new QVBoxLayout;
-    auto *add = new QPushButton("Add…"), *edit = new QPushButton("Edit…"), *del = new QPushButton("Remove");
+    auto *add = new QPushButton("Add…"), *edit = new QPushButton("Edit…"), *copy = new QPushButton("Copy…"),
+         *del = new QPushButton("Remove");
+    copy->setToolTip("New server with the settings of the selected one (like Nagstamon's \"Copy server\")");
     btns->addWidget(add);
     btns->addWidget(edit);
+    btns->addWidget(copy);
     btns->addWidget(del);
     btns->addStretch();
     srvLay->addWidget(list, 1);
     srvLay->addLayout(btns);
+    auto namesExcept = [&](int row) {
+        QStringList n;
+        for (int i = 0; i < tmp.servers.size(); ++i)
+            if (i != row) n << tmp.servers[i].name;
+        return n;
+    };
     connect(add, &QPushButton::clicked, &d, [&] {
         ServerConf s;
-        if (editServer(s)) { tmp.servers.append(s); refill(); }
+        if (editServer(s, namesExcept(-1), "Add server")) { tmp.servers.append(s); refill(); }
     });
     auto editRow = [&] {
         int r = list->currentRow();
-        if (r >= 0 && editServer(tmp.servers[r])) refill();
+        if (r >= 0 && editServer(tmp.servers[r], namesExcept(r), "Edit " + tmp.servers[r].name)) refill();
     };
+    connect(copy, &QPushButton::clicked, &d, [&] {
+        int r = list->currentRow();
+        if (r < 0) return;
+        ServerConf s = tmp.servers[r];
+        s.name = "Copy of " + s.name;
+        if (editServer(s, namesExcept(-1), "Copy " + tmp.servers[r].name)) {
+            tmp.servers.append(s);
+            refill();
+            list->setCurrentRow(tmp.servers.size() - 1);
+        }
+    });
     connect(edit, &QPushButton::clicked, &d, editRow);
     connect(list, &QListWidget::itemDoubleClicked, &d, editRow);
     connect(del, &QPushButton::clicked, &d, [&] {

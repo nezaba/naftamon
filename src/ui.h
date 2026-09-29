@@ -169,7 +169,7 @@ private:
     void downtimeDialog(const QVector<Item> &items);
     void submitDialog(const Item &item);
     void settingsDialog();
-    bool editServer(ServerConf &s);
+    bool editServer(ServerConf &s, const QStringList &taken, const QString &title);
     void updateTray(State worst, const int counts[STATE_COUNT]);
     void updateEmptyHint();
     bool confirmClose();  // false = keep the window open
