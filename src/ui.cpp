@@ -1799,13 +1799,19 @@ void App::settingsDialog() {
     });
     tabs->addTab(act, "Actions");
 
-    lay->addWidget(okCancel(&d));
+    auto apply = [&] {  // commit the widgets into tmp, then make it the live config
+        for (auto &c : commit) c();
+        cfg = tmp;
+        cfg.save();
+        applyConfig();
+    };
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+    connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, &d, apply);
+    lay->addWidget(buttons);
     d.resize(760, 520);
     bool ok = d.exec() == QDialog::Accepted;
     open = false;
-    if (!ok) return;
-    for (auto &c : commit) c();
-    cfg = tmp;
-    cfg.save();
-    applyConfig();
+    if (ok) apply();
 }
