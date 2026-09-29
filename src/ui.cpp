@@ -111,7 +111,7 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
         {"ack_expire", &c.ackExpire},
         {"highlight_new_events", &c.highlightNew},
         {"show_window_at_start", &c.showAtStart},
-        {"filter_new_only", &c.newOnly},
+        {"filter_hide_new", &c.hideNew},
         {"last_check_relative", &c.relativeLastCheck},
     };
 }
@@ -638,8 +638,8 @@ App::App() : proxy(new ItemProxy) {
     hideFlapping = toggle("Flapping", [this](bool on) {
         cfg.filters.allFlappingHosts = cfg.filters.allFlappingServices = on;
     });
-    newOnly = toggle("New only", [this](bool on) { cfg.newOnly = on; });
-    const std::pair<QToolButton *, char> badgeOf[] = {{hideAck, 'A'}, {hideDowntime, 'D'}, {hideFlapping, 'F'}, {newOnly, 'N'}};
+    hideNew = toggle("New", [this](bool on) { cfg.hideNew = on; });
+    const std::pair<QToolButton *, char> badgeOf[] = {{hideAck, 'A'}, {hideDowntime, 'D'}, {hideFlapping, 'F'}, {hideNew, 'N'}};
     for (auto [b, f] : badgeOf) {
         b->setIcon(badgeIcon(QChar(f), b->palette()));  // same badge as in the rows: doubles as the legend
         b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -942,20 +942,17 @@ void App::syncToggles() {
     const std::tuple<QToolButton *, bool, const char *> t[] = {
         {hideAck, f.acknowledged, "acknowledged problems"},
         {hideDowntime, f.downtime, "problems in downtime"},
-        {hideFlapping, f.allFlappingHosts && f.allFlappingServices, "flapping problems"}};
+        {hideFlapping, f.allFlappingHosts && f.allFlappingServices, "flapping problems"},
+        {hideNew, cfg.hideNew, "new problems (flag N)"}};
     for (auto [b, hidden, what] : t) {
         b->setChecked(hidden);
         QFont font = b->font();
         font.setStrikeOut(hidden);
         b->setFont(font);
         b->setToolTip(QString(hidden ? "Hiding %1 — click to show them" : "Showing %1 — click to hide them").arg(what) +
-                      " (same as Settings → Filters)");
+                      (b == hideNew ? "" : " (same as Settings → Filters)"));
     }
-    newOnly->setChecked(cfg.newOnly);
-    newOnly->setToolTip(cfg.newOnly ? "Showing only new problems (flag N) — click to show all"
-                                    : "Click to show only new problems (flag N): state changed since the window was "
-                                      "last closed");
-    proxy->newOnly = cfg.newOnly;
+    proxy->hideNew = cfg.hideNew;
     proxy->refilter();
 }
 
@@ -1325,7 +1322,6 @@ void App::runUpdate(const QString &latest) {
 void App::updateEmptyHint() {
     bool anyData = std::any_of(servers.begin(), servers.end(), [](ThrukServer *s) { return s->hasData; });
     QString t = proxy->stateOnly < STATE_COUNT && proxy->rowCount() == 0 && !model.items.isEmpty() ? "Nothing to show"
-              : proxy->newOnly && proxy->rowCount() == 0 && !model.items.isEmpty() ? "No new problems"
               : !search->text().isEmpty() && proxy->rowCount() == 0 ? "No matches"
               : model.items.isEmpty() && anyData                   ? "✓  All OK — no problems"
               : model.items.isEmpty() && !lastErrorFree()          ? "No connection — see the status line below"
@@ -1456,7 +1452,7 @@ void App::downtimeDialog(const QVector<Item> &items) {
         f->addRow("Targets:", new QLabel(targetsText(items)));
         auto *comment = new QLineEdit(cfg.dtComment);
         auto *fixed = new QRadioButton("Fixed");
-        auto *flexible = new QRadioButton("Flexible (duration below)");
+        auto *flexible = new QRadioButton("Flexible");
         (cfg.dtFixed ? fixed : flexible)->setChecked(true);
         auto *start = new QLineEdit(form.startTime);
         auto *end = new QLineEdit(form.endTime);
@@ -1476,10 +1472,29 @@ void App::downtimeDialog(const QVector<Item> &items) {
         dur->addWidget(new QLabel("min"));
         f->addRow("Comment:", comment);
         f->addRow("Type:", type);
-        f->addRow("Start time:", start);
-        f->addRow("End time:", end);
-        f->addRow("Duration:", dur);
+        auto *startLabel = new QLabel, *endLabel = new QLabel, *durLabel = new QLabel("Duration:"), *hint = new QLabel;
+        hint->setWordWrap(true);
+        hint->setForegroundRole(QPalette::PlaceholderText);
+        f->addRow(startLabel, start);
+        f->addRow(endLabel, end);
+        f->addRow(durLabel, dur);
+        f->addRow(hint);
         f->addRow(okCancel(&d));
+        // Nagios semantics: fixed = start..end, duration ignored; flexible = starts when a problem
+        // occurs inside the start..end window and then lasts "duration"
+        auto sync = [=] {
+            bool flex = flexible->isChecked();
+            startLabel->setText(flex ? "Window start:" : "Start time:");
+            endLabel->setText(flex ? "Window end:" : "End time:");
+            for (QWidget *w : {static_cast<QWidget *>(hours), static_cast<QWidget *>(minutes),
+                               static_cast<QWidget *>(durLabel)})
+                w->setEnabled(flex);
+            hint->setText(flex ? "Starts when the host/service has a problem between window start and end, "
+                                 "then lasts the duration."
+                               : "Active from start to end time. The duration is not used.");
+        };
+        connect(fixed, &QRadioButton::toggled, &d, sync);
+        sync();
         if (d.exec() != QDialog::Accepted) return;
         cfg.dtComment = comment->text();
         cfg.dtFixed = fixed->isChecked();

@@ -43,7 +43,7 @@ struct AppConfig {
     int ackExpireHours = 2, ackExpireMinutes = 0;
     bool highlightNew = true;  // Nagstamon highlight_new_events
     bool showAtStart = true;
-    bool newOnly = false;  // "N New only" quick filter
+    bool hideNew = false;  // "N New" quick filter
     bool relativeLastCheck = true;
     int closeAction = 0;       // CloseAsk / CloseMinimize / CloseQuit
     QVector<CustomAction> customActions{{"SSH", "ssh $HOST$", true}};
@@ -75,11 +75,11 @@ public:
     QVariant headerData(int section, Qt::Orientation o, int role) const override;
 };
 
-// sorting + search, plus the "New only" toggle
+// sorting + search, plus the "New" (hide new problems) toggle
 class ItemProxy : public QSortFilterProxyModel {
 public:
     const StatusModel *m = nullptr;
-    bool newOnly = false;
+    bool hideNew = false;
     State stateOnly = STATE_COUNT;  // status chip filter, STATE_COUNT = all
     void refilter() {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
@@ -91,7 +91,7 @@ public:
     }
 protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override {
-        if (newOnly && !m->fresh.contains(m->items[row].key())) return false;
+        if (hideNew && m->fresh.contains(m->items[row].key())) return false;
         if (stateOnly < STATE_COUNT && m->items[row].state != stateOnly) return false;
         return QSortFilterProxyModel::filterAcceptsRow(row, parent);
     }
@@ -132,7 +132,7 @@ private:
     QTimer pollTimer, tickTimer;
     StatusModel model;
     ItemProxy *proxy;
-    QToolButton *hideAck, *hideDowntime, *hideFlapping, *newOnly;  // quick filters next to search
+    QToolButton *hideAck, *hideDowntime, *hideFlapping, *hideNew;  // quick filters next to search
     QToolButton *updateBtn;
     QNetworkAccessManager updateNam;
     StatusBar *bar;
