@@ -43,6 +43,9 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 
 ## Extras
 
+* Status chips with counts next to the search box: click one to show only that state.
+* Quick filter buttons Acknowledged / Downtime / Flapping / New: pressed = hidden, saved. They are also the legend
+  of the row badges.
 * Search box (Ctrl+F, Esc clears), shortcuts R (recheck), A (acknowledge), D (downtime), F5 (refresh).
 * Recheck all services on host (`cmd_typ=17`, forced), remove acknowledgement (`cmd_typ=51/52`).
 * Acknowledge with expiry (`use_expire` + `expire_time`); only honoured if the core supports expiring acks (Naemon, Icinga).
