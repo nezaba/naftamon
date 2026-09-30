@@ -6,6 +6,26 @@ Native (C++/Qt6) Linux replacement for Nagstamon, for Thruk servers.
 
     ./install.sh && ~/.local/bin/naftamon
 
+## Switching from Nagstamon
+
+Naftamon imports your Nagstamon configuration, so there is nothing to set up again. On the first start it finds
+`~/.nagstamon` and offers the import; later, use **Settings → Servers → Import from Nagstamon…** (if the folder is
+elsewhere, e.g. a copy from another machine, it asks for it). Nagstamon's files are only read, both apps can run side
+by side.
+
+Imported:
+
+* **Thruk servers** with URL, username, password, disabled backends, "ignore certificate" and "display name" options.
+  The login is decoded from Nagstamon's obfuscated format; if it cannot be read (password not saved, or kept in
+  Nagstamon's keyring) the server dialog opens with everything else filled in.
+* **The same Thruk added several times** with different disabled backends (a common workaround in Nagstamon) can be
+  merged into one server: backends shown by any copy stay shown, and the Backend column tells them apart.
+* **Filters, regex filters, notification settings and colors**: Naftamon uses Nagstamon's option names.
+* **Custom actions** of type command (`$ADDRESS$` becomes `$HOST$`); Nagstamon's unchanged default actions are left out.
+
+Not imported: other monitor types (listed in the import dialog), browser/URL actions, and the update interval
+(Naftamon keeps 10 s instead of Nagstamon's 60 s).
+
 ## Build & run
 
     mkdir -p build && cd build && qmake6 ../naftamon.pro && make
@@ -49,9 +69,6 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 * Search box (Ctrl+F, Esc clears), shortcuts R (recheck), A (acknowledge), D (downtime), F5 (refresh).
 * Recheck all services on host (`cmd_typ=17`, forced), remove acknowledgement (`cmd_typ=51/52`).
 * Acknowledge with expiry (`use_expire` + `expire_time`); only honoured if the core supports expiring acks (Naemon, Icinga).
-* Import from Nagstamon (offered at first start, and in Settings → Servers): reads `~/.nagstamon` without changing it;
-  Thruk servers with login, filters, notification settings, colors and command actions. The same Thruk added several times
-  with different disabled backends can be merged into one server. The update interval is not imported.
 * Custom actions (Settings → Actions), default "SSH" = `ssh $HOST$` in a terminal. Placeholders are shell-quoted
   (Nagstamon inserts them raw). Terminal: `$TERMINAL`, else konsole, gnome-terminal, kgx, xfce4-terminal, alacritty,
   kitty, foot, xterm.
