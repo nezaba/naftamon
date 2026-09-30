@@ -191,7 +191,7 @@ private:
     void settingsDialog();
     bool editServer(ServerConf &s, const QStringList &taken, const QString &title);
     // reads ~/.nagstamon (read only), asks, merges into `into`; true if anything was imported
-    bool importNagstamon(AppConfig &into, bool silentIfNothing);
+    bool importNagstamon(AppConfig &into, bool silentIfNothing, QString dir = {});  // dir: default ~/.nagstamon
     void updateTray(State worst, const int counts[STATE_COUNT]);
     void updateEmptyHint();
     void showBanner(const QString &text, bool error = false);

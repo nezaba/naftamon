@@ -12,6 +12,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -2012,8 +2013,6 @@ void App::settingsDialog() {
 
 // ---------------------------------------------------------------- Nagstamon import
 
-static QString nagstamonDir() { return QDir::homePath() + "/.nagstamon"; }
-
 // Nagstamon writes its files with Python's configparser: "[section]" and "key = value" lines
 static QHash<QString, QString> readNagstamonFile(const QString &path) {
     QHash<QString, QString> h;
@@ -2026,15 +2025,18 @@ static QHash<QString, QString> readNagstamonFile(const QString &path) {
     return h;
 }
 
-static QList<QHash<QString, QString>> readNagstamonDir(const QString &sub) {
+static QList<QHash<QString, QString>> readNagstamonDir(const QString &dir) {
     QList<QHash<QString, QString>> out;
-    for (const QFileInfo &fi : QDir(nagstamonDir() + "/" + sub).entryInfoList({"*.conf"}, QDir::Files, QDir::Name))
+    for (const QFileInfo &fi : QDir(dir).entryInfoList({"*.conf"}, QDir::Files, QDir::Name))
         out << readNagstamonFile(fi.filePath());
     return out;
 }
 
-bool App::importNagstamon(AppConfig &into, bool silentIfNothing) {
-    QHash<QString, QString> main = readNagstamonFile(nagstamonDir() + "/nagstamon.conf");
+bool App::importNagstamon(AppConfig &into, bool silentIfNothing, QString dir) {
+    if (dir.isEmpty()) dir = QDir::homePath() + "/.nagstamon";  // Nagstamon's default on Linux
+    if (!QFile::exists(dir + "/nagstamon.conf") && QFile::exists(dir + "/.nagstamon/nagstamon.conf"))
+        dir += "/.nagstamon";  // a home folder (e.g. a backup) was picked
+    QHash<QString, QString> main = readNagstamonFile(dir + "/nagstamon.conf");
     main.remove("update_interval_seconds");  // Nagstamon's 60 s default would undo the point of Naftamon
     if (main.value("notification_default_sound", "True") == "True")  // its custom sounds are then unused
         for (int st = 0; st < STATE_COUNT; ++st) main.remove("notification_custom_sound_" + lower(State(st)));
@@ -2045,7 +2047,7 @@ bool App::importNagstamon(AppConfig &into, bool silentIfNothing) {
     for (const ServerConf &c : into.servers) existing << key(c);
     QVector<ServerConf> found;
     QSet<QString> hadLogin;  // names of servers with a username in Nagstamon
-    for (const auto &c : readNagstamonDir("servers")) {
+    for (const auto &c : readNagstamonDir(dir + "/servers")) {
         QString name = c.value("name"), type = c.value("type");
         if (type != "Thruk") { skipped << name + " (" + type + ")"; continue; }
         ServerConf s;
@@ -2083,7 +2085,7 @@ bool App::importNagstamon(AppConfig &into, bool silentIfNothing) {
                                       "/usr/bin/gnome-terminal -x telnet root@$ADDRESS$",
                                       "/usr/bin/terminator -x ssh root@$HOST$ update.sh"};
     QVector<CustomAction> actions;
-    for (const auto &a : readNagstamonDir("actions")) {
+    for (const auto &a : readNagstamonDir(dir + "/actions")) {
         QString cmd = a.value("string");
         if (a.value("type") != "command" || a.value("enabled") == "False" || defaults.contains(cmd)) continue;
         cmd.replace("$ADDRESS$", "$HOST$");  // Naftamon has no host address; the name usually resolves
@@ -2093,15 +2095,21 @@ bool App::importNagstamon(AppConfig &into, bool silentIfNothing) {
     }
 
     if (main.isEmpty() && found.isEmpty() && actions.isEmpty()) {
-        if (!silentIfNothing)
-            QMessageBox::information(window, "Naftamon", "No Nagstamon settings found in " + nagstamonDir() + ".");
-        return false;
+        if (silentIfNothing) return false;
+        // other places: Nagstamon started with a config folder argument, or a copy from another machine
+        if (QMessageBox::question(window, "Naftamon", "No Nagstamon settings found in " + dir +
+                                                          ".\n\nChoose the folder that contains nagstamon.conf?") !=
+            QMessageBox::Yes)
+            return false;
+        QString picked = QFileDialog::getExistingDirectory(window, "Nagstamon settings folder", QDir::homePath(),
+                                                           QFileDialog::ShowDirsOnly);  // ~/.nagstamon is hidden: Ctrl+H or type the path
+        return !picked.isEmpty() && importNagstamon(into, false, picked);
     }
     QDialog d(window);
     d.setWindowTitle("Import from Nagstamon");
     d.setMinimumWidth(520);
     auto *lay = new QVBoxLayout(&d);
-    QStringList lines{"Nagstamon settings found in " + nagstamonDir() + ":"};
+    QStringList lines{"Nagstamon settings found in " + dir + ":"};
     if (!found.isEmpty()) {
         QStringList names;
         for (const ServerConf &s : found) names << s.name;
