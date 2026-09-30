@@ -32,6 +32,10 @@ static void coreTests() {
         CHECK(deobfuscate(obfuscate(pw)) == pw);
     CHECK(!obfuscate("secret").contains("secret") && obfuscate("secret") != obfuscate("secres"));
     CHECK(deobfuscate("not ours").isEmpty() && deobfuscate("").isEmpty());
+    // made by Nagstamon's Config.obfuscate() (Python)
+    CHECK(nagstamonDeobfuscate("eJwFwUEOgjAQAMAHeQCJMe3BQ11XCtsVCRAfQEwTTKzSBtN9vTMnZeuHWHMNqL+Zosue1wDwOU7cYjHuDz39Cg/l5Obw8gNJo2MFLhoBPl9SB8utwzcn2LhZSe47lBiQKtWPbCwk5fVWDkly+/wDe2Ajgg==") == "admin");
+    CHECK(nagstamonDeobfuscate("eJwFwdEKwiAUANBP6lor9NEpQTlNYxE+rpG0oFmYOe/Xdw7AY79I16rz7/Oe6vNURFJwoQU9W5CLOvRss6WKhBVmb2kS1kR/o2siMJVJpddAVXT64GXN13nUuEvRB2G5YWS0RLXBQNdpyICZul7zmemmkQncF+vx/gfTYCqB") == "pä ss\\w0rd");
+    CHECK(nagstamonDeobfuscate("plain old password").isEmpty());
 
     RawStatus raw;
     Item down; down.server = "s"; down.host = "h1"; down.state = DOWN; down.ack = true;

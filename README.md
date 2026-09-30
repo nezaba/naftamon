@@ -49,6 +49,9 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 * Search box (Ctrl+F, Esc clears), shortcuts R (recheck), A (acknowledge), D (downtime), F5 (refresh).
 * Recheck all services on host (`cmd_typ=17`, forced), remove acknowledgement (`cmd_typ=51/52`).
 * Acknowledge with expiry (`use_expire` + `expire_time`); only honoured if the core supports expiring acks (Naemon, Icinga).
+* Import from Nagstamon (offered at first start, and in Settings → Servers): reads `~/.nagstamon` without changing it;
+  Thruk servers with login, filters, notification settings and command actions. The same Thruk added several times
+  with different disabled backends can be merged into one server. The update interval is not imported.
 * Custom actions (Settings → Actions), default "SSH" = `ssh $HOST$` in a terminal. Placeholders are shell-quoted
   (Nagstamon inserts them raw). Terminal: `$TERMINAL`, else konsole, gnome-terminal, kgx, xfce4-terminal, alacritty,
   kitty, foot, xterm.

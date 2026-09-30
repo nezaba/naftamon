@@ -56,6 +56,7 @@ struct AppConfig {
 
     static QString path();
     void load();
+    void loadSettings(const std::function<QVariant(const QString &, const QVariant &)> &get);
     void save() const;
 };
 
@@ -189,6 +190,8 @@ private:
     void submitDialog(const Item &item);
     void settingsDialog();
     bool editServer(ServerConf &s, const QStringList &taken, const QString &title);
+    // reads ~/.nagstamon (read only), asks, merges into `into`; true if anything was imported
+    bool importNagstamon(AppConfig &into, bool silentIfNothing);
     void updateTray(State worst, const int counts[STATE_COUNT]);
     void updateEmptyHint();
     void showBanner(const QString &text, bool error = false);

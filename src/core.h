@@ -38,6 +38,8 @@ struct Item {
 // being readable at a glance. (Qt's compress framing, so not byte-compatible with Nagstamon.)
 QString obfuscate(const QString &plain);
 QString deobfuscate(const QString &obfuscated);  // empty if the input is not valid
+// Nagstamon's own deobfuscate() (Python zlib framing), for importing its config; empty if not valid
+QString nagstamonDeobfuscate(const QString &obfuscated);
 
 // Nagstamon's human_readable_duration_from_timestamp()
 QString humanDuration(qint64 since, qint64 now);

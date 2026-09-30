@@ -25,16 +25,22 @@ QString obfuscate(const QString &plain) {
     return QString::fromLatin1(b.toBase64());
 }
 
-QString deobfuscate(const QString &obfuscated) {
+static QString unscramble(const QString &obfuscated, bool pythonZlib) {
     QByteArray b = QByteArray::fromBase64(obfuscated.toLatin1());
     for (int i = 0; i < 5; ++i) {
         if (b.size() < 5) return {};  // not ours; qUncompress would warn
+        // Python's zlib.compress() lacks the 4 byte size header of qCompress(); the size is only a
+        // starting buffer size for qUncompress, which grows it as needed
+        if (pythonZlib) b.prepend(QByteArray::fromHex("00010000"));
         b = qUncompress(b);
         std::reverse(b.begin(), b.end());
         b = QByteArray::fromBase64(b);
     }
     return QString::fromUtf8(b);
 }
+
+QString deobfuscate(const QString &obfuscated) { return unscramble(obfuscated, false); }
+QString nagstamonDeobfuscate(const QString &obfuscated) { return unscramble(obfuscated, true); }
 
 QString humanDuration(qint64 since, qint64 now) {
     qint64 td = qMax<qint64>(0, now - since);

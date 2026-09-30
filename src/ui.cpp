@@ -123,32 +123,37 @@ static QList<QPair<QString, RegexFilter *>> regexFields(Filters &f) {
             {"re_duration", &f.reDuration}, {"re_attempt", &f.reAttempt}};
 }
 
-void AppConfig::load() {
-    QSettings s(path(), QSettings::IniFormat);
-    for (auto &b : boolFields(*this)) *b.second = s.value(b.first, *b.second).toBool();
+// the single-value settings; get(key, current) returns current when the key is absent
+void AppConfig::loadSettings(const std::function<QVariant(const QString &, const QVariant &)> &get) {
+    for (auto &b : boolFields(*this)) *b.second = get(b.first, *b.second).toBool();
     for (auto &r : regexFields(filters)) {
-        r.second->enabled = s.value(r.first + "_enabled", false).toBool();
-        r.second->reverse = s.value(r.first + "_reverse", false).toBool();
-        r.second->re.setPattern(s.value(r.first + "_pattern").toString());
+        r.second->enabled = get(r.first + "_enabled", r.second->enabled).toBool();
+        r.second->reverse = get(r.first + "_reverse", r.second->reverse).toBool();
+        r.second->re.setPattern(get(r.first + "_pattern", r.second->re.pattern()).toString());
         if (!r.second->re.isValid()) r.second->enabled = false;
     }
-    intervalSec = qBound(1, s.value("update_interval_seconds", intervalSec).toInt(), 3600);
+    intervalSec = qBound(1, get("update_interval_seconds", intervalSec).toInt(), 3600);
     for (int st = 0; st < STATE_COUNT; ++st) {
-        notifyIf[st] = s.value("notify_if_" + lower(State(st)), notifyIf[st]).toBool();
-        customSound[st] = s.value("notification_custom_sound_" + lower(State(st))).toString();
-        action[st] = s.value("notification_action_" + lower(State(st)) + "_string").toString();
+        notifyIf[st] = get("notify_if_" + lower(State(st)), notifyIf[st]).toBool();
+        customSound[st] = get("notification_custom_sound_" + lower(State(st)), customSound[st]).toString();
+        action[st] = get("notification_action_" + lower(State(st)) + "_string", action[st]).toString();
     }
-    ackComment = s.value("ack_comment", ackComment).toString();
-    dtComment = s.value("downtime_comment", dtComment).toString();
-    dtHours = s.value("downtime_hours", dtHours).toInt();
-    dtMinutes = s.value("downtime_minutes", dtMinutes).toInt();
-    barPos = s.value("bar_pos", barPos).toPoint();
-    windowGeometry = s.value("window_geometry").toByteArray();
-    headerState = s.value("table_header").toByteArray();
-    notifiedUpdate = s.value("update_notified").toString();
-    closeAction = qBound(0, s.value("close_action", closeAction).toInt(), 2);
-    ackExpireHours = s.value("ack_expire_hours", ackExpireHours).toInt();
-    ackExpireMinutes = s.value("ack_expire_minutes", ackExpireMinutes).toInt();
+    ackComment = get("ack_comment", ackComment).toString();
+    dtComment = get("downtime_comment", dtComment).toString();
+    dtHours = get("downtime_hours", dtHours).toInt();
+    dtMinutes = get("downtime_minutes", dtMinutes).toInt();
+    barPos = get("bar_pos", barPos).toPoint();
+    windowGeometry = get("window_geometry", windowGeometry).toByteArray();
+    headerState = get("table_header", headerState).toByteArray();
+    notifiedUpdate = get("update_notified", notifiedUpdate).toString();
+    closeAction = qBound(0, get("close_action", closeAction).toInt(), 2);
+    ackExpireHours = get("ack_expire_hours", ackExpireHours).toInt();
+    ackExpireMinutes = get("ack_expire_minutes", ackExpireMinutes).toInt();
+}
+
+void AppConfig::load() {
+    QSettings s(path(), QSettings::IniFormat);
+    loadSettings([&s](const QString &key, const QVariant &current) { return s.value(key, current); });
     if (s.contains("custom_actions/size")) {  // absent: keep the default SSH action
         customActions.clear();
         int na = s.beginReadArray("custom_actions");
@@ -606,6 +611,7 @@ static QByteArray toneWav(State s) {
 App::App() : proxy(new ItemProxy) {
     proxy->setParent(this);
     proxy->m = &model;
+    bool firstStart = !QFile::exists(AppConfig::path());
     cfg.load();
     proxy->setSourceModel(&model);
 
@@ -872,7 +878,13 @@ App::App() : proxy(new ItemProxy) {
     connect(&tickTimer, &QTimer::timeout, this, [this] { if (window->isVisible()) model.tick(); });
 
     applyConfig();
-    if (cfg.servers.isEmpty()) QTimer::singleShot(0, this, &App::settingsDialog);
+    QTimer::singleShot(0, this, [this, firstStart] {
+        if (firstStart && importNagstamon(cfg, true)) {  // offer Nagstamon's servers and settings once
+            cfg.save();
+            applyConfig();
+        }
+        if (cfg.servers.isEmpty()) settingsDialog();
+    });
 
     // development aid: NAFTAMON_SCREENSHOT=file.png renders the status window once and quits
     QString shot = qEnvironmentVariable("NAFTAMON_SCREENSHOT");
@@ -1795,6 +1807,11 @@ void App::settingsDialog() {
     btns->addWidget(edit);
     btns->addWidget(copy);
     btns->addWidget(del);
+    auto *imp = new QPushButton("Import from Nagstamon…");
+    imp->setToolTip("Servers, filters, notification settings and command actions from ~/.nagstamon");
+    btns->addWidget(imp);
+    bool importAfter = false;  // applies the dialog, imports, then reopens it
+    connect(imp, &QPushButton::clicked, &d, [&] { importAfter = true; d.accept(); });
     btns->addStretch();
     srvLay->addWidget(list, 1);
     srvLay->addLayout(btns);
@@ -1983,4 +2000,144 @@ void App::settingsDialog() {
     bool ok = d.exec() == QDialog::Accepted;
     open = false;
     if (ok) apply();
+    if (importAfter)
+        QTimer::singleShot(0, this, [this] {
+            if (importNagstamon(cfg, false)) {
+                cfg.save();
+                applyConfig();
+            }
+            settingsDialog();
+        });
+}
+
+// ---------------------------------------------------------------- Nagstamon import
+
+static QString nagstamonDir() { return QDir::homePath() + "/.nagstamon"; }
+
+// Nagstamon writes its files with Python's configparser: "[section]" and "key = value" lines
+static QHash<QString, QString> readNagstamonFile(const QString &path) {
+    QHash<QString, QString> h;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return h;
+    for (const QString &line : QString::fromUtf8(f.readAll()).split('\n')) {
+        int eq = line.indexOf('=');
+        if (eq > 0 && !line.startsWith('[')) h.insert(line.left(eq).trimmed(), line.mid(eq + 1).trimmed());
+    }
+    return h;
+}
+
+static QList<QHash<QString, QString>> readNagstamonDir(const QString &sub) {
+    QList<QHash<QString, QString>> out;
+    for (const QFileInfo &fi : QDir(nagstamonDir() + "/" + sub).entryInfoList({"*.conf"}, QDir::Files, QDir::Name))
+        out << readNagstamonFile(fi.filePath());
+    return out;
+}
+
+bool App::importNagstamon(AppConfig &into, bool silentIfNothing) {
+    QHash<QString, QString> main = readNagstamonFile(nagstamonDir() + "/nagstamon.conf");
+    main.remove("update_interval_seconds");  // Nagstamon's 60 s default would undo the point of Naftamon
+    if (main.value("notification_default_sound", "True") == "True")  // its custom sounds are then unused
+        for (int st = 0; st < STATE_COUNT; ++st) main.remove("notification_custom_sound_" + lower(State(st)));
+
+    // Thruk servers; others are listed as skipped
+    auto key = [](const ServerConf &c) { return c.cgiUrl() + '\t' + c.user; };
+    QStringList skipped, existing;
+    for (const ServerConf &c : into.servers) existing << key(c);
+    QVector<ServerConf> found;
+    QSet<QString> hadLogin;  // names of servers with a username in Nagstamon
+    for (const auto &c : readNagstamonDir("servers")) {
+        QString name = c.value("name"), type = c.value("type");
+        if (type != "Thruk") { skipped << name + " (" + type + ")"; continue; }
+        ServerConf s;
+        s.name = name;
+        s.url = c.value("monitor_cgi_url").isEmpty() ? c.value("monitor_url") : c.value("monitor_cgi_url");
+        s.user = nagstamonDeobfuscate(c.value("username"));
+        // no password in the file: "save password" off, or kept in Nagstamon's keyring
+        if (c.value("save_password") != "False") s.password = nagstamonDeobfuscate(c.value("password"));
+        s.disabledBackends = c.value("disabled_backends") == "None" ? QString() : c.value("disabled_backends");
+        s.enabled = c.value("enabled") != "False";
+        s.ignoreTls = c.value("ignore_cert") == "True";
+        s.useDisplayNameService = c.value("use_display_name_service") == "True";
+        if (!c.value("username").isEmpty()) hadLogin.insert(s.name);
+        if (existing.contains(key(s))) { skipped << name + " (already configured)"; continue; }
+        found.append(s);
+    }
+    // the same Thruk added several times with different hidden backends
+    QStringList merges;
+    QVector<ServerConf> merged;
+    for (const ServerConf &s : found) {
+        auto m = std::find_if(merged.begin(), merged.end(), [&](const ServerConf &x) { return key(x) == key(s); });
+        if (m == merged.end() || s.user.isEmpty()) { merged.append(s); continue; }
+        QStringList both;  // shown by either copy = hidden by both
+        for (const QString &id : m->disabledIds())
+            if (s.disabledIds().contains(id)) both << id;
+        merges << m->name + " + " + s.name;
+        m->disabledBackends = both.join(',');
+        m->enabled = m->enabled || s.enabled;
+        if (m->password.isEmpty()) m->password = s.password;
+    }
+
+    // command actions; Nagstamon's untouched Linux defaults are left out
+    static const QStringList defaults{"/usr/bin/rdesktop -g 1024x768 $ADDRESS$", "/usr/bin/vncviewer $ADDRESS$",
+                                      "/usr/bin/gnome-terminal -x ssh root@$ADDRESS$",
+                                      "/usr/bin/gnome-terminal -x telnet root@$ADDRESS$",
+                                      "/usr/bin/terminator -x ssh root@$HOST$ update.sh"};
+    QVector<CustomAction> actions;
+    for (const auto &a : readNagstamonDir("actions")) {
+        QString cmd = a.value("string");
+        if (a.value("type") != "command" || a.value("enabled") == "False" || defaults.contains(cmd)) continue;
+        cmd.replace("$ADDRESS$", "$HOST$");  // Naftamon has no host address; the name usually resolves
+        bool have = std::any_of(into.customActions.cbegin(), into.customActions.cend(),
+                                [&](const CustomAction &x) { return x.command == cmd; });
+        if (!have) actions.append({a.value("name"), cmd, false});  // Nagstamon runs them without a terminal
+    }
+
+    if (main.isEmpty() && found.isEmpty() && actions.isEmpty()) {
+        if (!silentIfNothing)
+            QMessageBox::information(window, "Naftamon", "No Nagstamon settings found in " + nagstamonDir() + ".");
+        return false;
+    }
+    QDialog d(window);
+    d.setWindowTitle("Import from Nagstamon");
+    d.setMinimumWidth(520);
+    auto *lay = new QVBoxLayout(&d);
+    QStringList lines{"Nagstamon settings found in " + nagstamonDir() + ":"};
+    if (!found.isEmpty()) {
+        QStringList names;
+        for (const ServerConf &s : found) names << s.name;
+        lines << "• Thruk servers: " + names.join(", ");
+    }
+    if (!actions.isEmpty()) lines << QString("• %1 custom action(s)").arg(actions.size());
+    if (!main.isEmpty()) lines << "• filter and notification settings (update interval stays at Naftamon's)";
+    if (!skipped.isEmpty()) lines << "Not imported: " + skipped.join(", ");
+    auto *text = new QLabel(lines.join('\n'));
+    text->setWordWrap(true);
+    lay->addWidget(text);
+    auto *merge = new QCheckBox("Merge the same Thruk added more than once into one server: " + merges.join(", ") +
+                                ". Backends shown by any copy stay shown.");
+    merge->setChecked(true);
+    merge->setVisible(!merges.isEmpty());
+    lay->addWidget(merge);
+    auto *buttons = new QDialogButtonBox;
+    buttons->addButton("Import", QDialogButtonBox::AcceptRole);
+    buttons->addButton(QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+    lay->addWidget(buttons);
+    if (d.exec() != QDialog::Accepted) return false;
+
+    into.loadSettings([&main](const QString &k, const QVariant &current) {
+        return main.contains(k) ? QVariant(main.value(k)) : current;
+    });
+    into.customActions += actions;
+    for (ServerConf s : merge->isChecked() ? merged : found) {
+        bool unreadable = hadLogin.contains(s.name) && (s.user.isEmpty() || s.password.isEmpty());
+        QStringList taken;
+        for (const ServerConf &c : into.servers) taken << c.name;
+        while (taken.contains(s.name)) s.name += " (Nagstamon)";
+        // login not readable: ask with the normal server dialog (also offers the backend list)
+        if (unreadable) editServer(s, taken, "Imported " + s.name + ": enter the login");
+        into.servers.append(s);
+    }
+    return true;
 }
