@@ -42,6 +42,7 @@
 #include <QTableView>
 #include <QTableWidget>
 #include <QToolButton>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
@@ -1377,7 +1378,8 @@ void App::checkForUpdates(bool quiet) {
     if (!updateBtn->isEnabled()) return;  // a check is running
     updateBtn->setEnabled(false);
     if (!quiet) updateBtn->setText("Checking…");
-    QNetworkRequest req(QUrl(QString("https://api.github.com/repos/%1/commits/main").arg(REPO)));
+    // newest commit on main that changed src/ (same rule as the version stamped in by naftamon.pro)
+    QNetworkRequest req(QUrl(QString("https://api.github.com/repos/%1/commits?sha=main&path=src&per_page=1").arg(REPO)));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setHeader(QNetworkRequest::UserAgentHeader, "naftamon");
     req.setTransferTimeout(15000);
@@ -1385,7 +1387,7 @@ void App::checkForUpdates(bool quiet) {
     connect(r, &QNetworkReply::finished, this, [this, r, quiet] {
         r->deleteLater();
         updateBtn->setEnabled(true);
-        QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
+        QJsonObject o = QJsonDocument::fromJson(r->readAll()).array().at(0).toObject();
         QString latest = o["sha"].toString().left(12), mine = NAFTAMON_COMMIT;
         bool failed = r->error() != QNetworkReply::NoError || latest.isEmpty();
         bool newer = !failed && !(latest.startsWith(mine.left(12)) && mine != "unknown");
