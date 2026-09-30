@@ -17,13 +17,13 @@ static const char HOSTS_QUERY[] =
     "/status.cgi?hostgroup=all&style=hostdetail&hoststatustypes=12"
     "&view_mode=json&entries=all&columns=name,state,last_check,last_state_change,plugin_output,"
     "current_attempt,max_check_attempts,active_checks_enabled,notifications_enabled,is_flapping,"
-    "acknowledged,scheduled_downtime_depth,state_type,host_display_name,display_name";
+    "acknowledged,scheduled_downtime_depth,state_type,host_display_name,display_name,peer_name";
 static const char SERVICES_QUERY[] =
     "/status.cgi?host=all&servicestatustypes=28&view_mode=json&entries=all&columns=host_name,"
     "description,state,last_check,last_state_change,plugin_output,current_attempt,max_check_attempts,"
     "active_checks_enabled,is_flapping,notifications_enabled,acknowledged,state_type,"
     "scheduled_downtime_depth,host_display_name,display_name,host_state,host_acknowledged,"
-    "host_scheduled_downtime_depth,host_is_flapping,host_active_checks_enabled";
+    "host_scheduled_downtime_depth,host_is_flapping,host_active_checks_enabled,peer_name";
 
 static const int POLL_TIMEOUT_MS = 20000;
 static const int CMD_TIMEOUT_MS = 30000;      // Thruk may hold a command up to wait_timeout (default 10s)
@@ -35,6 +35,11 @@ QString ServerConf::cgiUrl() const {
     QString u = url.trimmed();
     while (u.endsWith('/')) u.chop(1);
     return u.endsWith("/cgi-bin") ? u : u + "/cgi-bin";
+}
+
+QStringList ServerConf::disabledIds() const {
+    static const QRegularExpression sep("\\s*,\\s*");
+    return disabledBackends.trimmed().split(sep, Qt::SkipEmptyParts);
 }
 
 QByteArray formEncode(const QList<QPair<QString, QString>> &params) {
@@ -77,6 +82,7 @@ bool parseStatusJson(const QByteArray &json, bool isHost, const QString &server,
         QJsonObject o = v.toObject();
         Item i;
         i.server = server;
+        i.backend = o["peer_name"].toString();
         int st = int(num(o["state"]));
         if (isHost) {
             i.host = o["name"].toString();
@@ -159,9 +165,9 @@ QNetworkReply *ThrukServer::post(const QString &url, const QByteArray &body) {
 
 void ThrukServer::login(std::function<void(bool)> done) {
     QUrl base(conf.cgiUrl() + "/");
-    if (!conf.disabledBackends.isEmpty()) {
+    if (!conf.disabledIds().isEmpty()) {
         QStringList parts;
-        for (const QString &b : conf.disabledBackends.split(',', Qt::SkipEmptyParts)) parts << b.trimmed() + "=2";
+        for (const QString &b : conf.disabledIds()) parts << b + "=2";
         QNetworkCookie c("thruk_backends", parts.join('&').toUtf8());
         nam.cookieJar()->setCookiesFromUrl({c}, base);
     }
@@ -179,6 +185,28 @@ void ThrukServer::login(std::function<void(bool)> done) {
         loggedIn = r->error() == QNetworkReply::NoError;
         if (!loggedIn) error = replyError(r);
         done(loggedIn);
+    });
+}
+
+// REST /r/sites (Thruk >= 2.24) lists every backend, whatever the thruk_backends cookie says.
+void ThrukServer::fetchBackends(std::function<void(QVector<Backend>, QString)> done) {
+    auto go = [this, done] {
+        QString base = conf.cgiUrl();
+        base.chop(8);  // "/cgi-bin"
+        QNetworkReply *r = get(base + "/r/sites");
+        connect(r, &QNetworkReply::finished, this, [r, done] {
+            r->deleteLater();
+            QVector<Backend> list;
+            for (const auto &v : QJsonDocument::fromJson(r->readAll()).array())
+                list.append({v.toObject()["id"].toString(), v.toObject()["name"].toString()});
+            done(list, r->error() != QNetworkReply::NoError ? replyError(r)
+                       : list.isEmpty() ? QString("no backend list in the answer") : QString());
+        });
+    };
+    if (loggedIn) return go();
+    login([this, go, done](bool ok) {
+        if (ok) go();
+        else done({}, error);
     });
 }
 

@@ -5,7 +5,7 @@ and the use_wait_feature behaviour (POST with json=1 blocks until the recheck ha
 usage: mock_thruk.py PORT [--no-wait] [--basic] [--big N]   (user admin / password secret)
 --basic: every request needs a Basic Authorization header; 401 without a challenge otherwise
 """
-import json, sys, threading, time, urllib.parse
+import json, re, sys, threading, time, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 PORT = int(sys.argv[1])
@@ -23,7 +23,7 @@ def svc(host, desc, state, **kw):
              max_check_attempts=3, active_checks_enabled=1, is_flapping=0, notifications_enabled=1,
              acknowledged=0, state_type=1, scheduled_downtime_depth=0, host_display_name=host,
              host_state=0, host_acknowledged=0, host_scheduled_downtime_depth=0, host_is_flapping=0,
-             host_active_checks_enabled=1)
+             host_active_checks_enabled=1, peer_key='a1', peer_name='alpha')
     d.update(kw)
     return d
 
@@ -31,12 +31,13 @@ hosts = {
     'web01': dict(name='web01', state=1, last_check=now() - 30, last_state_change=now() - 100,
                   plugin_output='PING CRITICAL', current_attempt=1, max_check_attempts=1,
                   active_checks_enabled=1, notifications_enabled=1, is_flapping=0, acknowledged=0,
-                  scheduled_downtime_depth=0, state_type=1, host_display_name='web01', display_name='web01'),
+                  scheduled_downtime_depth=0, state_type=1, host_display_name='web01', display_name='web01',
+                  peer_key='a1', peer_name='alpha'),
 }
 services = {
     ('db01', 'disk'): svc('db01', 'disk', 2),
     ('db01', 'load'): svc('db01', 'load', 1, state_type=0, current_attempt=1),
-    ('app01', 'http'): svc('app01', 'http', 3, acknowledged=1),
+    ('app01', 'http'): svc('app01', 'http', 3, acknowledged=1, peer_key='b2', peer_name='beta'),
 }
 
 # --big N: add N problem services on N/10 hosts (performance tests)
@@ -87,6 +88,9 @@ class H(BaseHTTPRequestHandler):
             return self.send(404, 'no')
         if not self.authed():
             return self.send(200, '<html><form action="login.cgi"><input name="login"></form></html>')
+        if u.path == '/thruk/r/sites':  # REST: all backends, the cookie does not matter
+            return self.send(200, json.dumps([{'id': 'a1', 'name': 'alpha'}, {'id': 'b2', 'name': 'beta'}]),
+                             'application/json')
         if u.path.endswith('/status.cgi'):
             host = q.get('host', ['all'])[0]
             with lock:
@@ -104,6 +108,10 @@ class H(BaseHTTPRequestHandler):
                         data = [h for h in hosts.values() if h['state'] != 0]
                     else:
                         data = [s for s in services.values() if s['state'] != 0]
+                # thruk_backends cookie: "key=2&key2=2" hides those backends
+                m = re.search(r'thruk_backends="?([^;"]*)', self.headers.get('Cookie') or '')
+                off = [p.split('=')[0] for p in m.group(1).split('&')] if m else []
+                data = [d for d in data if d['peer_key'] not in off]
                 return self.send(200, json.dumps(data), 'application/json')
         if u.path.endswith('/cmd.cgi'):
             t = time.strftime('%Y-%m-%d %H:%M:%S')

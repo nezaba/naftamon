@@ -61,9 +61,11 @@ struct AppConfig {
 class StatusModel : public QAbstractTableModel {
     Q_OBJECT
 public:
-    enum Col { Server, Host, Service, Status, LastCheck, Duration, Attempt, Info, COLS };
+    enum Col { Backend = BY_BACKEND, Host = BY_HOST, Service = BY_SERVICE, Status = BY_STATUS,
+               LastCheck = BY_LAST_CHECK, Duration = BY_DURATION, Attempt = BY_ATTEMPT, Info = BY_INFO, COLS };
     enum { FlagsRole = Qt::UserRole + 1 };  // "ADFPN" flags of Host/Service cells, painted as badges
     bool relativeLastCheck = true;
+    bool multiServer = false;  // Backend column also names the server
     QVector<Item> items;
     QSet<QString> rechecking;  // item keys with a recheck in progress
     QSet<QString> fresh;       // item keys of new problems not yet seen (Nagstamon "N" flag)
@@ -81,6 +83,9 @@ public:
     const StatusModel *m = nullptr;
     bool hideNew = false;
     State stateOnly = STATE_COUNT;  // status chip filter, STATE_COUNT = all
+    QVector<SortKey> sortKeys;      // clicked header columns in click order, first = primary
+    void cycleSort(int col);        // not sorted -> ascending -> descending -> not sorted
+    QVariant headerData(int section, Qt::Orientation o, int role) const override;
     void refilter() {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
         beginFilterChange();
@@ -94,6 +99,9 @@ protected:
         if (hideNew && m->fresh.contains(m->items[row].key())) return false;
         if (stateOnly < STATE_COUNT && m->items[row].state != stateOnly) return false;
         return QSortFilterProxyModel::filterAcceptsRow(row, parent);
+    }
+    bool lessThan(const QModelIndex &l, const QModelIndex &r) const override {
+        return itemLess(m->items[l.row()], m->items[r.row()], sortKeys);
     }
 };
 
@@ -163,6 +171,7 @@ private:
     void playSound(State s);
     void toggleWindow();
     void contextMenu(const QPoint &pos);
+    void backendMenu(const QPoint &at);  // show/hide backends, from the Backend column header
     QVector<Item> selectedItems() const;
     ThrukServer *serverOf(const Item &i) const;
     void recheck(QVector<Item> items);

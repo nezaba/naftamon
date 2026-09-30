@@ -43,6 +43,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
+#include <QWidgetAction>
+#include <QScrollBar>
 #include <QWindow>
 #include <QtMath>
 
@@ -292,18 +294,11 @@ QVariant StatusModel::data(const QModelIndex &idx, int role) const {
         f.setItalic(rechecking.contains(i.key()));
         return f;
     }
-    if (role == Qt::UserRole) {  // sort key
-        switch (idx.column()) {
-        case Status: return int(i.state);
-        case LastCheck: return i.lastCheck;
-        case Duration: return -i.lastChange;
-        case Attempt: return i.attempt;
-        default: return data(idx, Qt::DisplayRole).toString().toLower();
-        }
-    }
     if (role != Qt::DisplayRole) return {};
     switch (idx.column()) {
-    case Server: return i.server;
+    case Backend:
+        if (i.backend.isEmpty()) return i.server;  // Thruk without peer_name
+        return multiServer ? i.server + " · " + i.backend : i.backend;
     case Host: return i.host;
     case Service: return i.service;
     case Status: return stateName(i.state) + (rechecking.contains(i.key()) ? "  ⟳ rechecking…" : "");
@@ -318,10 +313,31 @@ QVariant StatusModel::data(const QModelIndex &idx, int role) const {
 }
 
 QVariant StatusModel::headerData(int section, Qt::Orientation o, int role) const {
-    static const char *const H[] = {"Server", "Host", "Service", "Status", "Last Check", "Duration", "Attempt",
+    static const char *const H[] = {"Backend", "Host", "Service", "Status", "Last Check", "Duration", "Attempt",
                                     "Status Information"};
     if (o == Qt::Horizontal && role == Qt::DisplayRole) return H[section];
     return {};
+}
+
+void ItemProxy::cycleSort(int col) {
+    auto k = std::find_if(sortKeys.begin(), sortKeys.end(), [col](const SortKey &s) { return s.field == col; });
+    if (k == sortKeys.end()) sortKeys.append({col, false});
+    else if (!k->descending) k->descending = true;
+    else sortKeys.erase(k);
+    sort(-1);  // model order; also needed because sort() ignores a repeated column
+    if (!sortKeys.isEmpty()) sort(0);  // lessThan() compares by sortKeys, whatever the column
+    emit headerDataChanged(Qt::Horizontal, 0, columnCount() - 1);
+}
+
+// sort arrow in the header text, numbered when several columns are sorted
+QVariant ItemProxy::headerData(int section, Qt::Orientation o, int role) const {
+    QVariant v = QSortFilterProxyModel::headerData(section, o, role);
+    if (o != Qt::Horizontal || role != Qt::DisplayRole) return v;
+    for (int i = 0; i < sortKeys.size(); ++i)
+        if (sortKeys[i].field == section)
+            return v.toString() + (sortKeys[i].descending ? " ▼" : " ▲") +
+                   (sortKeys.size() > 1 ? QString::number(i + 1) : QString());
+    return v;
 }
 
 // ---------------------------------------------------------------- flag badges, row painting
@@ -584,7 +600,6 @@ App::App() : proxy(new ItemProxy) {
     proxy->m = &model;
     cfg.load();
     proxy->setSourceModel(&model);
-    proxy->setSortRole(Qt::UserRole);
 
     window = new QWidget;
     window->setWindowTitle("Naftamon");
@@ -680,23 +695,35 @@ App::App() : proxy(new ItemProxy) {
     // fixed starting widths from the font (ResizeToContents would measure every row on each refresh)
     const QFontMetrics fm = view->fontMetrics();
     const std::pair<int, const char *> widths[] = {
-        {StatusModel::Server, "server-name"}, {StatusModel::Host, "host-name.example.com"},
+        {StatusModel::Backend, "backend-name"}, {StatusModel::Host, "host-name.example.com"},
         {StatusModel::Service, "service description"}, {StatusModel::Status, "UNREACHABLE  ⟳ rech"},
         {StatusModel::LastCheck, cfg.relativeLastCheck ? "59 min ago" : "2026-01-01 00:00:00"}, {StatusModel::Duration, "10d 23h 59m 59s"},
         {StatusModel::Attempt, "Attempt"}};
     for (auto [col, sample] : widths) view->setColumnWidth(col, fm.horizontalAdvance(sample) + 24);
     if (!cfg.headerState.isEmpty()) hh->restoreState(cfg.headerState);
-    // header clicks cycle ascending -> descending -> default. Default (at start) is the model's own
-    // order: worst state first, then host, service (Nagstamon's default "status descending").
+    // each header click cycles that column ascending -> descending -> off; columns sort together,
+    // the first clicked is the primary one. Nothing sorted (at start) is the model's own order:
+    // worst state first, then host, service (Nagstamon's default "status descending").
     hh->setSectionsClickable(true);
-    hh->setSortIndicatorShown(true);
-    hh->setSortIndicator(-1, Qt::AscendingOrder);  // -1 = no column sorted, no arrow
-    connect(hh, &QHeaderView::sectionClicked, this, [this, hh](int col) {
-        int cur = proxy->sortColumn();
-        if (cur != col) proxy->sort(col, Qt::AscendingOrder);
-        else if (proxy->sortOrder() == Qt::AscendingOrder) proxy->sort(col, Qt::DescendingOrder);
-        else proxy->sort(-1);  // back to the default order
-        hh->setSortIndicator(proxy->sortColumn(), proxy->sortOrder());
+    hh->setSortIndicatorShown(false);  // the arrows are in the header text (ItemProxy::headerData)
+    connect(hh, &QHeaderView::sectionClicked, this, [this](int col) { proxy->cycleSort(col); });
+    // drop-down at the right edge of the Backend header: which backends to show
+    auto *backendBtn = new QToolButton(hh->viewport());
+    backendBtn->setText("▾");
+    backendBtn->setAutoRaise(true);
+    backendBtn->setCursor(Qt::ArrowCursor);
+    backendBtn->setToolTip("Show / hide backends");
+    auto place = [hh, backendBtn] {
+        int h = hh->height();
+        backendBtn->setGeometry(hh->sectionViewportPosition(StatusModel::Backend) +
+                                    hh->sectionSize(StatusModel::Backend) - h - 4, 0, h, h);
+    };
+    connect(hh, &QHeaderView::sectionResized, this, place);
+    connect(hh, &QHeaderView::geometriesChanged, this, place);
+    connect(view->horizontalScrollBar(), &QScrollBar::valueChanged, this, place);
+    QTimer::singleShot(0, this, place);
+    connect(backendBtn, &QToolButton::clicked, this, [this, backendBtn] {
+        backendMenu(backendBtn->mapToGlobal(QPoint(0, backendBtn->height())));
     });
     proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     proxy->setFilterKeyColumn(-1);  // any column
@@ -925,7 +952,8 @@ void App::applyConfig() {
         s->refresh();
     }
     for (auto *s : old) s->deleteLater();  // removed or changed servers
-    view->setColumnHidden(StatusModel::Server, servers.size() < 2);
+    model.multiServer = servers.size() > 1;
+    view->setColumnHidden(StatusModel::Backend, false);  // was hidden with one server
     if (!cfg.flash) bar->setFlashing(false);  // takes effect now, not only for the next notification
     pollTimer.start(cfg.intervalSec * 1000);
     if (cfg.floatingBar) {
@@ -960,6 +988,53 @@ void App::syncToggles() {
     }
     proxy->hideNew = cfg.hideNew;
     proxy->refilter();
+}
+
+// Same choice as the checklist in the server dialog. The boxes keep the menu open, so several can
+// be changed; the result is saved and applied once, when the menu closes.
+void App::backendMenu(const QPoint &at) {
+    if (servers.isEmpty()) return;
+    auto *menu = new QMenu(window);
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    auto left = std::make_shared<int>(servers.size());
+    for (ThrukServer *s : servers)
+        s->fetchBackends([=](QVector<Backend> list, QString error) {
+            if (servers.size() > 1 || !error.isEmpty())
+                menu->addAction(s->conf.name + (error.isEmpty() ? "" : ": backend list not available (" + error + ")"))
+                    ->setEnabled(false);
+            const QStringList off = s->conf.disabledIds();
+            for (const Backend &b : list) {
+                auto *box = new QCheckBox(b.name, menu);
+                box->setStyleSheet("QCheckBox{padding:4px 14px;}");
+                box->setChecked(!off.contains(b.id));
+                box->setProperty("server", s->conf.name);
+                box->setProperty("id", b.id);
+                auto *a = new QWidgetAction(menu);
+                a->setDefaultWidget(box);
+                menu->addAction(a);
+            }
+            if (--*left == 0) menu->popup(at);
+        });
+    connect(menu, &QMenu::aboutToHide, this, [this, menu] {
+        QHash<QString, QStringList> off;  // server name -> unchecked backend ids
+        for (auto *box : menu->findChildren<QCheckBox *>()) {
+            QStringList &ids = off[box->property("server").toString()];
+            if (!box->isChecked()) ids << box->property("id").toString();
+        }
+        bool changed = false;
+        for (ServerConf &c : cfg.servers) {
+            if (!off.contains(c.name)) continue;  // list not loaded: leave as it is
+            QStringList now = off[c.name], before = c.disabledIds();
+            now.sort();
+            before.sort();
+            if (now == before) continue;
+            c.disabledBackends = now.join(',');
+            changed = true;
+        }
+        if (!changed) return;
+        cfg.save();
+        applyConfig();
+    });
 }
 
 ThrukServer *App::serverOf(const Item &i) const {
@@ -1547,8 +1622,25 @@ bool App::editServer(ServerConf &s, const QStringList &taken, const QString &tit
     auto *user = new QLineEdit(s.user);
     auto *pass = new QLineEdit(s.password);
     pass->setEchoMode(QLineEdit::Password);
-    auto *backends = new QLineEdit(s.disabledBackends);
-    backends->setPlaceholderText("optional, comma separated backend ids");
+    // Backends of this Thruk as a checklist (checked = shown). What is saved are the ids of the
+    // unchecked ones, Nagstamon's disabled_backends; the id field is the fallback when the list
+    // cannot be loaded.
+    auto *backendList = new QListWidget;
+    backendList->setMaximumHeight(backendList->fontMetrics().height() * 9);
+    auto *backendNote = new QLabel("Enter URL and login, then press Load.");
+    backendNote->setWordWrap(true);
+    auto *backendIds = new QLineEdit(s.disabledBackends);
+    backendIds->setPlaceholderText("comma separated ids of the backends to hide");
+    auto *loadBtn = new QPushButton("Load");
+    backendList->hide();
+    auto disabledIds = [&] {
+        if (backendList->isHidden()) return backendIds->text().trimmed();
+        QStringList off;
+        for (int r = 0; r < backendList->count(); ++r)
+            if (backendList->item(r)->checkState() != Qt::Checked) off << backendList->item(r)->data(Qt::UserRole).toString();
+        return off.join(',');
+    };
+    ThrukServer *probe = nullptr;  // throwaway connection with the login typed in this dialog
     auto *enabled = new QCheckBox("Enabled");
     auto *tls = new QCheckBox("Ignore TLS certificate errors");
     auto *disp = new QCheckBox("Use service display name");
@@ -1559,11 +1651,49 @@ bool App::editServer(ServerConf &s, const QStringList &taken, const QString &tit
     f->addRow("Monitor CGI URL:", url);
     f->addRow("Username:", user);
     f->addRow("Password:", pass);
-    f->addRow("Disabled backends:", backends);
+    auto *backendBox = new QVBoxLayout;
+    auto *backendTop = new QHBoxLayout;
+    backendTop->addWidget(backendNote, 1);
+    backendTop->addWidget(loadBtn);
+    backendBox->addLayout(backendTop);
+    backendBox->addWidget(backendList);
+    backendBox->addWidget(backendIds);
+    f->addRow("Backends:", backendBox);
     f->addRow(enabled);
     f->addRow(tls);
     f->addRow(disp);
     f->addRow(okCancel(&d));
+    auto load = [&] {
+        if (url->text().trimmed().isEmpty()) return;
+        delete probe;
+        ServerConf c;
+        c.url = url->text().trimmed();
+        c.user = user->text();
+        c.password = pass->text();
+        c.ignoreTls = tls->isChecked();
+        probe = new ThrukServer(c, &d);
+        backendNote->setText("Loading backends…");
+        probe->fetchBackends([&](QVector<Backend> list, QString error) {
+            if (!error.isEmpty()) {
+                backendNote->setText("Could not load the backend list (" + error + "). Backend ids to hide:");
+                return;
+            }
+            const QStringList off = ServerConf{{}, {}, {}, {}, disabledIds()}.disabledIds();
+            backendList->clear();
+            for (const Backend &b : list) {
+                auto *it = new QListWidgetItem(b.name, backendList);
+                it->setData(Qt::UserRole, b.id);
+                it->setToolTip("id " + b.id);
+                it->setCheckState(off.contains(b.id) ? Qt::Unchecked : Qt::Checked);
+            }
+            backendList->show();
+            backendIds->hide();
+            backendNote->setText("Checked backends are shown in the list.");
+            loadBtn->setText("Reload");
+        });
+    };
+    connect(loadBtn, &QPushButton::clicked, &d, load);
+    load();
     if (d.exec() != QDialog::Accepted) return false;
     if (name->text().trimmed().isEmpty() || url->text().trimmed().isEmpty()) {
         QMessageBox::warning(window, "Naftamon", "Name and URL are required.");
@@ -1577,7 +1707,7 @@ bool App::editServer(ServerConf &s, const QStringList &taken, const QString &tit
     s.url = url->text().trimmed();
     s.user = user->text();
     s.password = pass->text();
-    s.disabledBackends = backends->text().trimmed();
+    s.disabledBackends = disabledIds();
     s.enabled = enabled->isChecked();
     s.ignoreTls = tls->isChecked();
     s.useDisplayNameService = disp->isChecked();

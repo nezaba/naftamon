@@ -81,6 +81,13 @@ static void coreTests() {
     CHECK(out.size() == 1 && out[0].state == CRITICAL && out[0].service == "D" && out[0].realService == "d");
     CHECK(out[0].passive && out[0].flapping && out[0].downtime && !out[0].hard && out[0].output == "a b");
     CHECK(!parseStatusJson("<html>", true, "s", false, &out));
+
+    // multi-column sort: host ascending, then service descending within the same host
+    QVector<Item> l{svc("b", "s1", WARNING), svc("a", "s2", CRITICAL), svc("A", "S1", WARNING)};
+    QVector<SortKey> keys{{BY_HOST, false}, {BY_SERVICE, true}};
+    std::stable_sort(l.begin(), l.end(), [&](const Item &x, const Item &y) { return itemLess(x, y, keys); });
+    CHECK(l[0].service == "s2" && l[1].service == "S1" && l[2].host == "b");
+    CHECK(!itemLess(l[0], l[0], keys) && !itemLess(l[0], l[1], {}));
 }
 
 static bool waitFor(ThrukServer &s, std::function<bool()> cond, int ms) {
@@ -129,7 +136,19 @@ static void thrukTests(const QString &url) {
     CHECK(s.error.isEmpty());
     CHECK(s.raw.hosts.size() == 1 && s.raw.services.size() == 3);
     const Item *diskp = find(s, "db01", "disk");
-    CHECK(diskp && diskp->state == CRITICAL);
+    CHECK(diskp && diskp->state == CRITICAL && diskp->backend == "alpha");
+
+    // backend list for the settings checklist, and hiding one of them
+    QVector<Backend> backends;
+    s.fetchBackends([&](QVector<Backend> list, QString) { backends = list; });
+    CHECK(waitFor(s, [&] { return !backends.isEmpty(); }, 3000));
+    CHECK(backends.size() == 2 && backends[1].id == "b2" && backends[1].name == "beta");
+    ServerConf hc = c;
+    hc.disabledBackends = "b2";
+    ThrukServer hidden(hc);
+    hidden.refresh();
+    CHECK(waitFor(hidden, [&] { return hidden.hasData; }, 5000));
+    CHECK(hidden.raw.services.size() == 2 && !find(hidden, "app01", "http"));
     if (!diskp) return;
     Item disk = *diskp;
 

@@ -15,7 +15,10 @@ struct ServerConf {
     QString disabledBackends;           // comma separated backend ids (Nagstamon disabled_backends)
     bool enabled = true, ignoreTls = false, useDisplayNameService = false;
     QString cgiUrl() const;
+    QStringList disabledIds() const;  // disabledBackends split and trimmed
 };
+
+struct Backend { QString id, name; };  // id = Thruk peer key
 
 // Values scraped from a cmd.cgi form page, like Nagstamon does for start_time/end_time.
 struct CmdForm { QString startTime, endTime, token; };
@@ -32,6 +35,8 @@ public:
     bool hasData = false;
 
     void refresh();
+    // every backend of this Thruk, disabled or not; error is empty on success
+    void fetchBackends(std::function<void(QVector<Backend>, QString error)> done);
     void recheck(const Item &item);
     // SCHEDULE_FORCED_HOST_SVC_CHECKS; services = the host's services we list, followed up like rechecks
     void recheckHostServices(const Item &item, const QVector<Item> &services);

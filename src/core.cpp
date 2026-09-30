@@ -64,6 +64,29 @@ State worstState(const QVector<Item> &visible) {
     return w;
 }
 
+static int compareField(const Item &a, const Item &b, int field) {
+    auto num = [](qint64 x, qint64 y) { return x < y ? -1 : x > y ? 1 : 0; };
+    auto text = [](const QString &x, const QString &y) { return QString::compare(x, y, Qt::CaseInsensitive); };
+    switch (field) {
+    case BY_BACKEND:
+        if (int c = text(a.server, b.server)) return c;
+        return text(a.backend, b.backend);
+    case BY_HOST: return text(a.host, b.host);
+    case BY_SERVICE: return text(a.service, b.service);
+    case BY_STATUS: return num(a.state, b.state);
+    case BY_LAST_CHECK: return num(a.lastCheck, b.lastCheck);
+    case BY_DURATION: return num(b.lastChange, a.lastChange);  // later change = shorter duration
+    case BY_ATTEMPT: return num(a.attempt, b.attempt);
+    default: return text(a.output, b.output);
+    }
+}
+
+bool itemLess(const Item &a, const Item &b, const QVector<SortKey> &keys) {
+    for (const SortKey &k : keys)
+        if (int c = compareField(a, b, k.field)) return k.descending ? c > 0 : c < 0;
+    return false;
+}
+
 QSet<QString> diffKeys(const QVector<Item> &visible, QHash<QString, State> *stateOf) {
     QSet<QString> keys;
     for (const Item &i : visible) {

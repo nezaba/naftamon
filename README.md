@@ -60,7 +60,13 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
   problem service's host come with the service row instead (`host_state`, `host_acknowledged`, ...).
 * Sound repeat actually repeats (Nagstamon's repeat condition can never be true).
 * OK action runs when a server recovers to all-OK, not on every refresh.
-* All servers in one table with a Server column (shown when more than one server).
+* All servers in one table with a Backend column (Thruk `peer_name`; with several servers it reads `server · backend`).
+* Backends are picked from a checklist in the server dialog (list from Thruk's REST `/r/sites`, Thruk 2.24+). The
+  unchecked ones are sent as the `thruk_backends` cookie, like Nagstamon's "disabled backends"; if the list cannot
+  be loaded, the ids can still be typed.
+  The ▾ button in the Backend column header offers the same checklist without opening Settings.
+* Header clicks sort by several columns at once: each column cycles ascending, descending, off; the first clicked
+  is the primary one (the number next to the arrow).
 * Built-in tones instead of Nagstamon's .wav files; custom sound files supported.
 * Ack/downtime dialogs remember the last values instead of separate "defaults" settings.
 

@@ -16,6 +16,7 @@ struct HostFlags { bool ack = false, downtime = false, flapping = false, passive
 
 struct Item {
     QString server, host, service;  // service empty => host item
+    QString backend;                // Thruk backend (peer_name) the item comes from
     QString realService;            // service description sent in commands (differs if display name used)
     State state = UP;
     bool hard = true;
@@ -67,6 +68,12 @@ struct RawStatus {
 QVector<Item> applyFilters(const RawStatus &raw, const Filters &f, qint64 now);
 
 State worstState(const QVector<Item> &visible);
+
+// Sortable fields, in the order of the table columns.
+enum SortField { BY_BACKEND, BY_HOST, BY_SERVICE, BY_STATUS, BY_LAST_CHECK, BY_DURATION, BY_ATTEMPT, BY_INFO };
+struct SortKey { int field; bool descending; };
+// Order by several fields, first key = primary. Text compares case-insensitively.
+bool itemLess(const Item &a, const Item &b, const QVector<SortKey> &keys);
 
 // Nagstamon worst_status_diff: worst state among items that are new (by host/service/state)
 // compared to the previous poll; UP if nothing new.
