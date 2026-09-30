@@ -1095,10 +1095,13 @@ void App::rebuild(ThrukServer *updated, bool quiet) {
     // "new" = state changed (Thruk last_state_change) after the status window was last closed,
     // or after startup. Nagstamon instead marks everything unseen by the app, so at start even
     // hours-old problems would be "new".
+    int shown[STATE_COUNT] = {};
     model.fresh.clear();
     model.rechecking.clear();
     for (const Item &i : all) {
         if (cfg.highlightNew && i.lastChange > seenSince) model.fresh.insert(i.key());
+        // chips count the rows in the list; tray and status bar keep counting hidden new problems
+        if (!(cfg.hideNew && model.fresh.contains(i.key()))) shown[i.state]++;
         if (auto *s = serverOf(i); s && s->isRechecking(i.key())) model.rechecking.insert(i.key());
     }
 
@@ -1117,10 +1120,10 @@ void App::rebuild(ThrukServer *updated, bool quiet) {
     }
 
     for (State st : SEVERITY_DESC) {
-        chips[st]->setText(QString("%1 %2").arg(counts[st]).arg(stateName(st)));
-        chips[st]->setVisible(counts[st] > 0);
+        chips[st]->setText(QString("%1 %2").arg(shown[st]).arg(stateName(st)));
+        chips[st]->setVisible(shown[st] > 0);
     }
-    if (proxy->stateOnly < STATE_COUNT && counts[proxy->stateOnly] == 0) showOnlyState(STATE_COUNT);
+    if (proxy->stateOnly < STATE_COUNT && shown[proxy->stateOnly] == 0) showOnlyState(STATE_COUNT);
     updateEmptyHint();
     bar->setCounts(counts, anyError);
     State worst = worstState(all);
