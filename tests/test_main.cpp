@@ -2,6 +2,7 @@
 // (see tests/run.sh, which starts tests/mock_thruk.py).
 #include "../src/core.h"
 #include "../src/thruk.h"
+#include "../src/keyring.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -221,9 +222,23 @@ static void thrukTests(const QString &url) {
     CHECK(waitFor(d, [&] { return !d.error.isEmpty(); }, 5000));
 }
 
+// only with KEYRING_TEST set: tests/run.sh points the session bus at a private keyring daemon
+static void keyringTests() {
+    QString e, pw = "x";
+    CHECK(Keyring::get("t@x", &pw, &e) && pw.isEmpty());  // no entry is not an error
+    CHECK(Keyring::set("t@x", "pä ss", &e));
+    CHECK(Keyring::get("t@x", &pw, &e) && pw == "pä ss");
+    CHECK(Keyring::set("t@x", "two", &e));  // replaces the entry
+    CHECK(Keyring::get("t@x", &pw, &e) && pw == "two");
+    Keyring::remove("t@x");
+    CHECK(Keyring::get("t@x", &pw, &e) && pw.isEmpty());
+    if (!e.isEmpty()) std::fprintf(stderr, "keyring: %s\n", qPrintable(e));
+}
+
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     coreTests();
+    if (qEnvironmentVariableIsSet("KEYRING_TEST")) keyringTests();
     QString url = qEnvironmentVariable("MOCK_URL");
     if (!url.isEmpty()) thrukTests(url);
     std::printf(failures ? "%d FAILURE(S)\n" : "all tests passed\n", failures);

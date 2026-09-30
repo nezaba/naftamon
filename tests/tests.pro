@@ -1,9 +1,9 @@
 TEMPLATE = app
 TARGET = naftamon-tests
-QT = core network
+QT = core network dbus
 CONFIG += c++17 console
-SOURCES += test_main.cpp ../src/core.cpp ../src/thruk.cpp
-HEADERS += ../src/core.h ../src/thruk.h
+SOURCES += test_main.cpp ../src/core.cpp ../src/thruk.cpp ../src/keyring.cpp
+HEADERS += ../src/core.h ../src/thruk.h ../src/keyring.h
 DESTDIR = .
 OBJECTS_DIR = obj
 MOC_DIR = obj

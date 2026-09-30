@@ -11,9 +11,8 @@ Native (C++/Qt6) Linux replacement for Nagstamon, for Thruk servers.
     mkdir -p build && cd build && qmake6 ../naftamon.pro && make
     ./naftamon
 
-Needs Qt6 Widgets, Network, Multimedia (no other dependencies). Server URL: the same "Monitor CGI URL" as in Nagstamon, e.g. `http://host/thruk/cgi-bin`.
-Config: `~/.config/naftamon/naftamon.ini`
-(mode 0600, passwords in plain text), or the path in `$NAFTAMON_CONFIG`.
+Needs Qt6 Widgets, Network, Multimedia, DBus (no other dependencies). Server URL: the same "Monitor CGI URL" as in Nagstamon, e.g. `http://host/thruk/cgi-bin`.
+Config: `~/.config/naftamon/naftamon.ini` (mode 0600), or the path in `$NAFTAMON_CONFIG`.
 
 Tests (core logic + Thruk client against a mock Thruk): `tests/run.sh`
 
@@ -61,6 +60,9 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 * Host query: only DOWN/UNREACHABLE hosts (`hoststatustypes=12`). Nagstamon also ORs in every host in downtime,
   acknowledged, soft or with notifications/checks disabled (thousands on big setups, every poll); the flags of a
   problem service's host come with the service row instead (`host_state`, `host_acknowledged`, ...).
+* Passwords go to the system keyring (Secret Service: GNOME Keyring, KWallet) by default. Without a usable keyring
+  they stay in the 0600 config file in plain text and Settings shows a warning. Nagstamon's keyring is opt-in on
+  Linux; otherwise it writes the password obfuscated (reversible without a key) into a config file.
 * Sound repeat actually repeats (Nagstamon's repeat condition can never be true).
 * OK action runs when a server recovers to all-OK, not on every refresh.
 * All servers in one table with a Backend column (Thruk `peer_name`; with several servers it reads `server · backend`).
@@ -75,7 +77,7 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
 
 ## Not implemented (yet)
 
-Other monitor types (Icinga, Checkmk, Zabbix…), browser/URL-type custom actions, $ADDRESS$ placeholder, proxies, system keyring,
+Other monitor types (Icinga, Checkmk, Zabbix…), browser/URL-type custom actions, $ADDRESS$ placeholder, proxies,
 autologin key, hover-to-open popup, fullscreen / windowed mode, color customization, hostgroup filter. On Wayland the compositor decides window positions (status bar can still be dragged).
 
 ## License

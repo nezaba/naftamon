@@ -46,6 +46,10 @@ struct AppConfig {
     bool hideNew = false;  // "N New" quick filter
     bool relativeLastCheck = true;
     int closeAction = 0;       // CloseAsk / CloseMinimize / CloseQuit
+    // passwords in the system keyring instead of the settings file; if the keyring is not usable
+    // they stay in the file and keyringError says why
+    bool useKeyring = true;
+    inline static QString keyringError;
     QVector<CustomAction> customActions{{"SSH", "ssh $HOST$", true}};
     QString ackComment = "acknowledged", dtComment = "scheduled downtime";
     int dtHours = 2, dtMinutes = 0;
@@ -55,6 +59,7 @@ struct AppConfig {
 
     static QString path();
     void load();
+    bool fetchPasswords();
     void save() const;
 };
 
