@@ -2,7 +2,6 @@
 // (see tests/run.sh, which starts tests/mock_thruk.py).
 #include "../src/core.h"
 #include "../src/thruk.h"
-#include "../src/keyring.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -28,6 +27,11 @@ static void coreTests() {
     CHECK(humanDuration(0, 65) == "01m 05s");
     CHECK(humanDuration(0, 3600 + 61) == "1h 01m 01s");
     CHECK(humanDuration(0, 86400 * 2 + 3600) == "2d 1h 00m 00s");
+
+    for (const QString &pw : {QString(), QString("secret"), QString("pä ss\\w0rd=\"x\"")})
+        CHECK(deobfuscate(obfuscate(pw)) == pw);
+    CHECK(!obfuscate("secret").contains("secret") && obfuscate("secret") != obfuscate("secres"));
+    CHECK(deobfuscate("not ours").isEmpty() && deobfuscate("").isEmpty());
 
     RawStatus raw;
     Item down; down.server = "s"; down.host = "h1"; down.state = DOWN; down.ack = true;
@@ -222,23 +226,9 @@ static void thrukTests(const QString &url) {
     CHECK(waitFor(d, [&] { return !d.error.isEmpty(); }, 5000));
 }
 
-// only with KEYRING_TEST set: tests/run.sh points the session bus at a private keyring daemon
-static void keyringTests() {
-    QString e, pw = "x";
-    CHECK(Keyring::get("t@x", &pw, &e) && pw.isEmpty());  // no entry is not an error
-    CHECK(Keyring::set("t@x", "pä ss", &e));
-    CHECK(Keyring::get("t@x", &pw, &e) && pw == "pä ss");
-    CHECK(Keyring::set("t@x", "two", &e));  // replaces the entry
-    CHECK(Keyring::get("t@x", &pw, &e) && pw == "two");
-    Keyring::remove("t@x");
-    CHECK(Keyring::get("t@x", &pw, &e) && pw.isEmpty());
-    if (!e.isEmpty()) std::fprintf(stderr, "keyring: %s\n", qPrintable(e));
-}
-
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     coreTests();
-    if (qEnvironmentVariableIsSet("KEYRING_TEST")) keyringTests();
     QString url = qEnvironmentVariable("MOCK_URL");
     if (!url.isEmpty()) thrukTests(url);
     std::printf(failures ? "%d FAILURE(S)\n" : "all tests passed\n", failures);

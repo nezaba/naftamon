@@ -33,6 +33,12 @@ struct Item {
     QString key() const { return server + '\t' + host + '\t' + service; }
 };
 
+// Password obfuscation for the config file, the recipe of Nagstamon's Config.obfuscate(): 5 rounds of
+// base64, reverse, compress. Not encryption: there is no key, it only keeps the password from
+// being readable at a glance. (Qt's compress framing, so not byte-compatible with Nagstamon.)
+QString obfuscate(const QString &plain);
+QString deobfuscate(const QString &obfuscated);  // empty if the input is not valid
+
 // Nagstamon's human_readable_duration_from_timestamp()
 QString humanDuration(qint64 since, qint64 now);
 

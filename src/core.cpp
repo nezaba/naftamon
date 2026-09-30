@@ -1,5 +1,6 @@
 #include "core.h"
 #include <QHash>
+#include <algorithm>
 
 static const char *const NAMES[STATE_COUNT] = {"UP", "UNKNOWN", "WARNING", "CRITICAL", "UNREACHABLE", "DOWN"};
 
@@ -12,6 +13,27 @@ QString Item::flags() const {
     if (flapping) f += 'F';
     if (passive) f += 'P';
     return f;
+}
+
+QString obfuscate(const QString &plain) {
+    QByteArray b = plain.toUtf8();
+    for (int i = 0; i < 5; ++i) {
+        b = b.toBase64();
+        std::reverse(b.begin(), b.end());
+        b = qCompress(b);
+    }
+    return QString::fromLatin1(b.toBase64());
+}
+
+QString deobfuscate(const QString &obfuscated) {
+    QByteArray b = QByteArray::fromBase64(obfuscated.toLatin1());
+    for (int i = 0; i < 5; ++i) {
+        if (b.size() < 5) return {};  // not ours; qUncompress would warn
+        b = qUncompress(b);
+        std::reverse(b.begin(), b.end());
+        b = QByteArray::fromBase64(b);
+    }
+    return QString::fromUtf8(b);
 }
 
 QString humanDuration(qint64 since, qint64 now) {

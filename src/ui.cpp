@@ -1,5 +1,4 @@
 #include "ui.h"
-#include "keyring.h"
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCheckBox>
@@ -116,32 +115,12 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
         {"show_window_at_start", &c.showAtStart},
         {"filter_hide_new", &c.hideNew},
         {"last_check_relative", &c.relativeLastCheck},
-        {"use_system_keyring", &c.useKeyring},
     };
 }
 
 static QList<QPair<QString, RegexFilter *>> regexFields(Filters &f) {
     return {{"re_host", &f.reHost}, {"re_service", &f.reService}, {"re_status_information", &f.reInfo},
             {"re_duration", &f.reDuration}, {"re_attempt", &f.reAttempt}};
-}
-
-// keyring entry of a server, like Nagstamon: username@monitor_url
-static QString account(const ServerConf &c) { return c.user + '@' + c.url; }
-static QHash<QString, QString> inKeyring;  // account -> password known to be in the keyring
-
-// true = the password is in the keyring and need not be in the settings file
-static bool keyringStore(const QString &acc, const QString &password) {
-    if (inKeyring.contains(acc) && inKeyring.value(acc) == password) return true;
-    QString &error = AppConfig::keyringError;
-    if (!error.isEmpty()) return false;  // not usable in this run, do not try again on every save
-    QString back;
-    if (!Keyring::set(acc, password, &error) || !Keyring::get(acc, &back, &error)) return false;
-    if (back != password) {
-        error = "the stored password could not be read back";
-        return false;
-    }
-    inKeyring[acc] = password;
-    return true;
 }
 
 void AppConfig::load() {
@@ -179,6 +158,7 @@ void AppConfig::load() {
         }
         s.endArray();
     }
+    bool plain = false;
     int n = s.beginReadArray("servers");
     for (int i = 0; i < n; ++i) {
         s.setArrayIndex(i);
@@ -186,7 +166,11 @@ void AppConfig::load() {
         c.name = s.value("name").toString();
         c.url = s.value("url").toString();
         c.user = s.value("username").toString();
-        c.password = s.value("password").toString();
+        c.password = deobfuscate(s.value("password_obfuscated").toString());
+        if (s.contains("password")) {  // plain text from older versions: rewritten obfuscated below
+            c.password = s.value("password").toString();
+            plain = true;
+        }
         c.disabledBackends = s.value("disabled_backends").toString();
         c.enabled = s.value("enabled", true).toBool();
         c.ignoreTls = s.value("ignore_cert", false).toBool();
@@ -194,22 +178,7 @@ void AppConfig::load() {
         servers.append(c);
     }
     s.endArray();
-    if (fetchPasswords()) save();  // moves them; they stay in the file if the keyring refuses
-}
-
-// Reads the passwords we do not have from the keyring. True if some are still in the settings file
-// (from before the keyring was used, or typed while it was not usable).
-bool AppConfig::fetchPasswords() {
-    keyringError.clear();
-    bool inFile = false;
-    if (!useKeyring) return false;
-    for (ServerConf &c : servers) {
-        if (c.user.isEmpty()) continue;
-        if (!c.password.isEmpty()) { inFile = true; continue; }
-        if (!Keyring::get(account(c), &c.password, &keyringError)) break;
-        inKeyring[account(c)] = c.password;
-    }
-    return inFile;
+    if (plain) save();
 }
 
 void AppConfig::save() const {
@@ -253,10 +222,6 @@ void AppConfig::save() const {
         s.setValue("terminal", customActions[i].terminal);
     }
     s.endArray();
-    if (!useKeyring) {  // switched off: the passwords go back into the file
-        for (auto it = inKeyring.cbegin(); it != inKeyring.cend(); ++it) Keyring::remove(it.key());
-        inKeyring.clear();
-    }
     s.remove("servers");
     s.beginWriteArray("servers", servers.size());
     for (int i = 0; i < servers.size(); ++i) {
@@ -265,9 +230,7 @@ void AppConfig::save() const {
         s.setValue("name", c.name);
         s.setValue("url", c.url);
         s.setValue("username", c.user);
-        // keyring if possible, else plain text in this 0600 file
-        bool kept = useKeyring && !c.user.isEmpty() && !c.password.isEmpty() && keyringStore(account(c), c.password);
-        s.setValue("password", kept ? QString() : c.password);
+        s.setValue("password_obfuscated", obfuscate(c.password));  // not encrypted; the file is 0600
         s.setValue("disabled_backends", c.disabledBackends);
         s.setValue("enabled", c.enabled);
         s.setValue("ignore_cert", c.ignoreTls);
@@ -895,12 +858,6 @@ App::App() : proxy(new ItemProxy) {
     connect(&tickTimer, &QTimer::timeout, this, [this] { if (window->isVisible()) model.tick(); });
 
     applyConfig();
-    // migrated passwords that cannot be read now; without this it only looks like a failed login
-    if (!AppConfig::keyringError.isEmpty() &&
-        std::any_of(cfg.servers.cbegin(), cfg.servers.cend(),
-                    [](const ServerConf &c) { return !c.user.isEmpty() && c.password.isEmpty(); }))
-        showBanner("System keyring not available (" + AppConfig::keyringError +
-                   "): saved passwords could not be read. Enter them again in Settings → Servers.", true);
     if (cfg.servers.isEmpty()) QTimer::singleShot(0, this, &App::settingsDialog);
 
     // development aid: NAFTAMON_SCREENSHOT=file.png renders the status window once and quits
@@ -1865,17 +1822,6 @@ void App::settingsDialog() {
     closeBox->setCurrentIndex(tmp.closeAction);
     commit.append([&tmp, closeBox] { tmp.closeAction = closeBox->currentIndex(); });
     gf->addRow("Closing the window (X):", closeBox);
-    gf->addRow(check("Store passwords in the system keyring", tmp.useKeyring));
-    auto *keyringWarn = new QLabel;
-    keyringWarn->setWordWrap(true);
-    auto showKeyringWarn = [this, keyringWarn] {
-        keyringWarn->setVisible(cfg.useKeyring && !AppConfig::keyringError.isEmpty());
-        keyringWarn->setText("⚠ System keyring not available (" + AppConfig::keyringError + "). Passwords are kept in the "
-                             "settings file, readable only by you. If a server reports a failed login, enter its "
-                             "password again under Servers.");
-    };
-    showKeyringWarn();
-    gf->addRow(keyringWarn);
     gf->addRow(new QLabel("Config file: " + AppConfig::path()));
     tabs->addTab(gen, "General");
 
@@ -1992,10 +1938,8 @@ void App::settingsDialog() {
     auto apply = [&] {  // commit the widgets into tmp, then make it the live config
         for (auto &c : commit) c();
         cfg = tmp;
-        cfg.fetchPasswords();  // asks the keyring again, it may have come up or been switched on
         cfg.save();
         applyConfig();
-        showKeyringWarn();
     };
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, &d, &QDialog::accept);
