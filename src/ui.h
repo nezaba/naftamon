@@ -15,7 +15,7 @@ class QLineEdit;
 class QToolButton;
 class QFrame;
 
-QColor stateBg(State s);
+QColor stateBg(State s);  // STATE_COUNT = connection error
 QColor stateFg(State s);
 QPixmap appIconPixmap(int size);
 
@@ -53,6 +53,7 @@ struct AppConfig {
     QPoint barPos{-1, -1};
     QByteArray windowGeometry, headerState;
     QString notifiedUpdate;  // commit the new-version notice was already shown for
+    QColor colorBg[STATE_COUNT + 1], colorFg[STATE_COUNT + 1];  // index STATE_COUNT = connection error
 
     static QString path();
     void load();
@@ -113,6 +114,7 @@ public:
     StatusBar();
     void setCounts(const int counts[STATE_COUNT], bool error);
     void setFlashing(bool on);
+    void restyle();  // after a color change
 signals:
     void clicked();
 protected:
@@ -125,7 +127,6 @@ private:
     QTimer flashTimer;
     bool inverted = false, dragging = false;
     QPoint pressPos;
-    void restyle();
 };
 
 class App : public QObject {

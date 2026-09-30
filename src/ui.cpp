@@ -3,6 +3,7 @@
 #include <QBoxLayout>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDataStream>
 #include <QDateTime>
@@ -49,8 +50,8 @@
 #include <QWindow>
 #include <QtMath>
 
-// Nagstamon default colors (config.py)
-QColor stateBg(State s) {
+// Nagstamon default colors (config.py); index STATE_COUNT = connection error
+QColor defaultBg(int s) {
     switch (s) {
     case UP: return QColor("#006400");
     case UNKNOWN: return QColor("#FFA500");
@@ -61,10 +62,14 @@ QColor stateBg(State s) {
     default: return QColor("#D3D3D3");
     }
 }
-QColor stateFg(State s) {
-    return (s == UNKNOWN || s == WARNING) ? QColor("#000000") : QColor("#FFFFFF");
+QColor defaultFg(int s) {
+    return (s == UNKNOWN || s == WARNING || s == STATE_COUNT) ? QColor("#000000") : QColor("#FFFFFF");
 }
-static const QColor ERROR_BG("#D3D3D3"), ERROR_FG("#000000");
+// colors in use, set from the config by applyConfig()
+static QColor liveBg[STATE_COUNT + 1], liveFg[STATE_COUNT + 1];
+QColor stateBg(State s) { return liveBg[s].isValid() ? liveBg[s] : defaultBg(s); }
+QColor stateFg(State s) { return liveFg[s].isValid() ? liveFg[s] : defaultFg(s); }
+static const State ERROR_COLOR = STATE_COUNT;
 static const char REPO[] = "nezaba/naftamon";  // GitHub repo used by "Check for updates"
 static const State SEVERITY_DESC[] = {DOWN, UNREACHABLE, CRITICAL, UNKNOWN, WARNING};
 static const State SOUND_STATES[] = {WARNING, CRITICAL, DOWN};  // Nagstamon STATES_SOUND
@@ -150,10 +155,20 @@ void AppConfig::loadSettings(const std::function<QVariant(const QString &, const
     closeAction = qBound(0, get("close_action", closeAction).toInt(), 2);
     ackExpireHours = get("ack_expire_hours", ackExpireHours).toInt();
     ackExpireMinutes = get("ack_expire_minutes", ackExpireMinutes).toInt();
+    for (int st = 0; st <= STATE_COUNT; ++st) {  // Nagstamon's names: color_warning_text, ..., color_error_background
+        QString n = "color_" + (st == STATE_COUNT ? QString("error") : lower(State(st)));
+        QColor bg(get(n + "_background", colorBg[st].name()).toString()), fg(get(n + "_text", colorFg[st].name()).toString());
+        colorBg[st] = bg.isValid() ? bg : defaultBg(st);
+        colorFg[st] = fg.isValid() ? fg : defaultFg(st);
+    }
 }
 
 void AppConfig::load() {
     QSettings s(path(), QSettings::IniFormat);
+    for (int st = 0; st <= STATE_COUNT; ++st) {
+        colorBg[st] = defaultBg(st);
+        colorFg[st] = defaultFg(st);
+    }
     loadSettings([&s](const QString &key, const QVariant &current) { return s.value(key, current); });
     if (s.contains("custom_actions/size")) {  // absent: keep the default SSH action
         customActions.clear();
@@ -221,6 +236,11 @@ void AppConfig::save() const {
     s.setValue("close_action", closeAction);
     s.setValue("ack_expire_hours", ackExpireHours);
     s.setValue("ack_expire_minutes", ackExpireMinutes);
+    for (int st = 0; st <= STATE_COUNT; ++st) {
+        QString n = "color_" + (st == STATE_COUNT ? QString("error") : lower(State(st)));
+        s.setValue(n + "_background", colorBg[st].name());
+        s.setValue(n + "_text", colorFg[st].name());
+    }
     s.remove("custom_actions");
     s.beginWriteArray("custom_actions", customActions.size());
     for (int i = 0; i < customActions.size(); ++i) {
@@ -491,7 +511,7 @@ void StatusBar::restyle() {
         l->setStyleSheet(QString("background:%1;color:%2;font-weight:bold;padding:3px 4px;").arg(bg.name(), fg.name()));
     };
     for (int s = 0; s < STATE_COUNT; ++s) style(labels[s], stateBg(State(s)), stateFg(State(s)));
-    style(errorLabel, ERROR_BG, ERROR_FG);
+    style(errorLabel, stateBg(ERROR_COLOR), stateFg(ERROR_COLOR));
 }
 
 void StatusBar::mousePressEvent(QMouseEvent *e) {
@@ -638,11 +658,7 @@ App::App() : proxy(new ItemProxy) {
         auto *c = new QToolButton;
         c->setCheckable(true);
         c->setToolTip("Show only " + stateName(st) + " — click again to show all");
-        c->setStyleSheet(QString("QToolButton{background:%1;color:%2;border:2px solid transparent;border-radius:10px;"
-                                 "padding:1px 8px;font-weight:600;}"
-                                 "QToolButton:checked{border-color:palette(highlight);}")
-                             .arg(stateBg(st).name(), stateFg(st).name()));
-        c->hide();
+        c->hide();  // colors: applyConfig()
         connect(c, &QToolButton::clicked, this, [this, st](bool on) { showOnlyState(on ? st : STATE_COUNT); });
         chips[st] = c;
         top->addWidget(c);
@@ -998,6 +1014,16 @@ void App::applyConfig() {
     tray.show();
     if (!cfg.floatingBar && !QSystemTrayIcon::isSystemTrayAvailable()) window->show();
     model.relativeLastCheck = cfg.relativeLastCheck;
+    for (int st = 0; st <= STATE_COUNT; ++st) {
+        liveBg[st] = cfg.colorBg[st];
+        liveFg[st] = cfg.colorFg[st];
+    }
+    for (State st : SEVERITY_DESC)
+        chips[st]->setStyleSheet(QString("QToolButton{background:%1;color:%2;border:2px solid transparent;border-radius:10px;"
+                                         "padding:1px 8px;font-weight:600;}"
+                                         "QToolButton:checked{border-color:palette(highlight);}")
+                                     .arg(stateBg(st).name(), stateFg(st).name()));
+    bar->restyle();
     syncToggles();
     rebuild(nullptr, true);  // filters may have changed: re-filter quietly
 }
@@ -1215,11 +1241,11 @@ void App::updateTray(State worst, const int counts[STATE_COUNT]) {
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
-    p.setBrush(allError ? ERROR_BG : stateBg(worst));
+    p.setBrush(stateBg(allError ? ERROR_COLOR : worst));
     p.setPen(Qt::NoPen);
     p.drawRoundedRect(pm.rect().adjusted(2, 2, -2, -2), 12, 12);
     if (problems > 0) {
-        p.setPen(allError ? ERROR_FG : stateFg(worst));
+        p.setPen(stateFg(allError ? ERROR_COLOR : worst));
         QFont f = p.font();
         f.setBold(true);
         f.setPixelSize(problems > 99 ? 24 : 34);
@@ -1985,6 +2011,46 @@ void App::settingsDialog() {
         }
     });
     tabs->addTab(act, "Actions");
+
+    // colors (Nagstamon's color_* options)
+    auto *colPage = new QWidget;
+    auto *cg = new QGridLayout(colPage);
+    QLabel *samples[STATE_COUNT + 1];
+    auto paintSample = [&](int st) {
+        samples[st]->setStyleSheet(QString("background:%1;color:%2;font-weight:bold;padding:4px 10px;")
+                                       .arg(tmp.colorBg[st].name(), tmp.colorFg[st].name()));
+    };
+    auto pick = [&](int st, QColor &c) {
+        QColor n = QColorDialog::getColor(c, &d, samples[st]->text());
+        if (!n.isValid()) return;
+        c = n;
+        paintSample(st);
+    };
+    const int colorRows[] = {UP, UNKNOWN, WARNING, CRITICAL, UNREACHABLE, DOWN, ERROR_COLOR};
+    int row = 0;
+    for (int st : colorRows) {
+        samples[st] = new QLabel(st == UP ? "OK / UP" : st == ERROR_COLOR ? "Connection error" : stateName(State(st)));
+        paintSample(st);
+        auto *text = new QPushButton("Text…"), *bg = new QPushButton("Background…");
+        connect(text, &QPushButton::clicked, &d, [&, st] { pick(st, tmp.colorFg[st]); });
+        connect(bg, &QPushButton::clicked, &d, [&, st] { pick(st, tmp.colorBg[st]); });
+        cg->addWidget(samples[st], row, 0);
+        cg->addWidget(text, row, 1);
+        cg->addWidget(bg, row++, 2);
+    }
+    auto *resetColors = new QPushButton("Reset to defaults");
+    connect(resetColors, &QPushButton::clicked, &d, [&] {
+        for (int st : colorRows) {
+            tmp.colorBg[st] = defaultBg(st);
+            tmp.colorFg[st] = defaultFg(st);
+            paintSample(st);
+        }
+    });
+    cg->addWidget(resetColors, row++, 0);
+    cg->addWidget(new QLabel("Used in the list, the state chips, the floating status bar and the tray icon."), row++, 0, 1, 3);
+    cg->setRowStretch(row, 1);
+    cg->setColumnStretch(0, 1);
+    tabs->addTab(colPage, "Colors");
 
     auto apply = [&] {  // commit the widgets into tmp, then make it the live config
         for (auto &c : commit) c();
