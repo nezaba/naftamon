@@ -52,6 +52,7 @@ struct AppConfig {
     bool dtFixed = true;
     QPoint barPos{-1, -1};
     QByteArray windowGeometry, headerState;
+    QString notifiedUpdate;  // commit the new-version notice was already shown for
 
     static QString path();
     void load();
@@ -141,7 +142,8 @@ private:
     StatusModel model;
     ItemProxy *proxy;
     QToolButton *hideAck, *hideDowntime, *hideFlapping, *hideNew;  // quick filters next to search
-    QToolButton *updateBtn;
+    QToolButton *updateBtn, *bannerUpdate;  // bannerUpdate: "Update" button of the new-version notice
+    QString latestCommit;
     QNetworkAccessManager updateNam;
     StatusBar *bar;
     QWidget *window;
@@ -179,7 +181,8 @@ private:
     void recheckHostServices(const QVector<Item> &items);
     void runAction(const CustomAction &a, const Item &i);
     bool openInTerminal(const QString &cmd);
-    void checkForUpdates();
+    // quiet: automatic check (start, daily), only speaks up when there is a new version
+    void checkForUpdates(bool quiet = false);
     void runUpdate(const QString &latestCommit);
     void acknowledgeDialog(const QVector<Item> &items);
     void downtimeDialog(const QVector<Item> &items);

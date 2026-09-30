@@ -145,6 +145,7 @@ void AppConfig::load() {
     barPos = s.value("bar_pos", barPos).toPoint();
     windowGeometry = s.value("window_geometry").toByteArray();
     headerState = s.value("table_header").toByteArray();
+    notifiedUpdate = s.value("update_notified").toString();
     closeAction = qBound(0, s.value("close_action", closeAction).toInt(), 2);
     ackExpireHours = s.value("ack_expire_hours", ackExpireHours).toInt();
     ackExpireMinutes = s.value("ack_expire_minutes", ackExpireMinutes).toInt();
@@ -210,6 +211,7 @@ void AppConfig::save() const {
     s.setValue("bar_pos", barPos);
     s.setValue("window_geometry", windowGeometry);
     s.setValue("table_header", headerState);
+    s.setValue("update_notified", notifiedUpdate);
     s.setValue("close_action", closeAction);
     s.setValue("ack_expire_hours", ackExpireHours);
     s.setValue("ack_expire_minutes", ackExpireMinutes);
@@ -771,7 +773,14 @@ App::App() : proxy(new ItemProxy) {
     bannerClose->setText("✕");
     bannerClose->setAutoRaise(true);
     connect(bannerClose, &QToolButton::clicked, banner, &QWidget::hide);
+    bannerUpdate = new QToolButton;
+    bannerUpdate->setText("Update");
+    connect(bannerUpdate, &QToolButton::clicked, this, [this] {
+        banner->hide();
+        runUpdate(latestCommit);
+    });
     bl->addWidget(bannerText, 1);
+    bl->addWidget(bannerUpdate);
     bl->addWidget(bannerClose);
     banner->hide();
     bannerTimer.setSingleShot(true);
@@ -803,7 +812,12 @@ App::App() : proxy(new ItemProxy) {
     updateBtn->setAutoRaise(true);
     updateBtn->setFont(small);
     updateBtn->setToolTip(QString("Compare with the latest version on github.com/") + REPO + " and update");
-    connect(updateBtn, &QToolButton::clicked, this, &App::checkForUpdates);
+    connect(updateBtn, &QToolButton::clicked, this, [this] { checkForUpdates(); });
+    // one background check shortly after start and one a day (the app often runs for days)
+    QTimer::singleShot(5000, this, [this] { checkForUpdates(true); });
+    auto *daily = new QTimer(this);
+    connect(daily, &QTimer::timeout, this, [this] { checkForUpdates(true); });
+    daily->start(24 * 3600 * 1000);
     bottom->addWidget(updateBtn);
     v->addLayout(bottom);
 
@@ -1317,29 +1331,44 @@ bool App::openInTerminal(const QString &cmd) {
 
 // "Check for updates": latest commit of the GitHub repo vs the commit this binary was built from.
 // Updating runs in a terminal (progress visible): download, rebuild, reinstall, restart.
-void App::checkForUpdates() {
+void App::checkForUpdates(bool quiet) {
+    if (!updateBtn->isEnabled()) return;  // a check is running
     updateBtn->setEnabled(false);
-    updateBtn->setText("Checking…");
+    if (!quiet) updateBtn->setText("Checking…");
     QNetworkRequest req(QUrl(QString("https://api.github.com/repos/%1/commits/main").arg(REPO)));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setHeader(QNetworkRequest::UserAgentHeader, "naftamon");
     req.setTransferTimeout(15000);
     QNetworkReply *r = updateNam.get(req);
-    connect(r, &QNetworkReply::finished, this, [this, r] {
+    connect(r, &QNetworkReply::finished, this, [this, r, quiet] {
         r->deleteLater();
         updateBtn->setEnabled(true);
-        updateBtn->setText("Check for updates");
         QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
         QString latest = o["sha"].toString().left(12), mine = NAFTAMON_COMMIT;
-        if (r->error() != QNetworkReply::NoError || latest.isEmpty()) {
+        bool failed = r->error() != QNetworkReply::NoError || latest.isEmpty();
+        bool newer = !failed && !(latest.startsWith(mine.left(12)) && mine != "unknown");
+        if (!failed) latestCommit = newer ? latest : QString();
+        updateBtn->setText(latestCommit.isEmpty() ? "Check for updates" : "Update available");
+        QString date = o["commit"].toObject()["committer"].toObject()["date"].toString().left(10);
+        if (quiet) {  // no messages unless there is a version we have not announced yet
+            if (!newer || mine == "unknown" || cfg.notifiedUpdate == latest) return;
+            cfg.notifiedUpdate = latest;
+            cfg.save();
+            showBanner("A new version of Naftamon is available (" + date + ").");
+            bannerUpdate->show();
+            bannerTimer.stop();  // stays until closed
+            if (!window->isVisible())
+                tray.showMessage("Naftamon", "A new version is available. Open the window to update.");
+            return;
+        }
+        if (failed) {
             showBanner("Could not check for updates: " + r->errorString(), true);
             return;
         }
-        if (latest.startsWith(mine.left(12)) && mine != "unknown") {
+        if (!newer) {
             showBanner("Naftamon is up to date (" + mine + ").");
             return;
         }
-        QString date = o["commit"].toObject()["committer"].toObject()["date"].toString().left(10);
         if (QMessageBox::question(window, "Naftamon",
                                   "A new version of Naftamon is available (" + date + ").\n\nUpdate and restart now?") ==
             QMessageBox::Yes)
@@ -1430,6 +1459,7 @@ void App::showBanner(const QString &text, bool error) {
     banner->setStyleSheet(QString("QFrame{background:rgba(%1,%2,%3,%4);border-left:4px solid %5;border-radius:4px;}")
                               .arg(bg.red()).arg(bg.green()).arg(bg.blue()).arg(bg.alphaF()).arg(c.name()));
     bannerText->setText(text);
+    bannerUpdate->hide();
     banner->show();
     bannerTimer.start(error ? 15000 : 6000);
 }
