@@ -1378,8 +1378,11 @@ void App::maintenanceDialog() {
     table->setSortingEnabled(true);
     lay->addWidget(table, 1);
     auto *status = new QLabel;
-    auto *enableBtn = new QPushButton("Enable all checks");
+    auto *enableBtn = new QPushButton("Enable checks of selected");
     enableBtn->setToolTip("Take the selected hosts out of maintenance (with a fresh check)");
+    enableBtn->setEnabled(false);
+    connect(table->selectionModel(), &QItemSelectionModel::selectionChanged, &d,
+            [=] { enableBtn->setEnabled(table->selectionModel()->hasSelection()); });
     auto *reload = new QPushButton("Reload");
     auto *close = new QPushButton("Close");
     auto *row = new QHBoxLayout;
@@ -1395,6 +1398,7 @@ void App::maintenanceDialog() {
     auto load = [&] {
         rows.clear();
         table->setRowCount(0);
+        enableBtn->setEnabled(false);
         status->setText("Loading…");
         auto left = std::make_shared<int>(servers.size());
         auto errors = std::make_shared<QStringList>();
