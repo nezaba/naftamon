@@ -42,6 +42,19 @@ static QString unscramble(const QString &obfuscated, bool pythonZlib) {
 QString deobfuscate(const QString &obfuscated) { return unscramble(obfuscated, false); }
 QString nagstamonDeobfuscate(const QString &obfuscated) { return unscramble(obfuscated, true); }
 
+QString expandCommand(const QString &command, const QHash<QString, QString> &values) {
+    static const QRegularExpression placeholder("\\$(HOST|SERVICE|STATUS-INFO|USERNAME|SERVER)\\$");
+    auto quote = [](QString v) { return "'" + v.replace("'", "'\\''") + "'"; };
+    QString out;
+    qsizetype done = 0;
+    for (auto it = placeholder.globalMatch(command); it.hasNext();) {
+        QRegularExpressionMatch m = it.next();
+        out += command.mid(done, m.capturedStart() - done) + quote(values.value(m.captured(1)));
+        done = m.capturedEnd();
+    }
+    return out + command.mid(done);
+}
+
 QString humanDuration(qint64 since, qint64 now) {
     qint64 td = qMax<qint64>(0, now - since);
     qint64 d = td / 86400, h = td % 86400 / 3600, m = td % 3600 / 60, s = td % 60;

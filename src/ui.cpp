@@ -321,7 +321,8 @@ QVariant StatusModel::data(const QModelIndex &idx, int role) const {
         QString flags = data(idx, FlagsRole).toString();
         for (QChar f : flags) tip << (idx.column() == Host && !i.isHost() ? "Host: " : "") + flagText(f);
         tip << i.output;
-        return tip.join('\n');
+        // escaped: Qt renders a tooltip that looks like HTML as HTML (plugin output is not trusted)
+        return "<qt>" + tip.join('\n').toHtmlEscaped().replace('\n', "<br>") + "</qt>";
     }
     if (role == Qt::FontRole) {
         QFont f;
@@ -794,6 +795,7 @@ App::App() : proxy(new ItemProxy) {
     auto *bl = new QHBoxLayout(banner);
     bl->setContentsMargins(10, 4, 4, 4);
     bannerText = new QLabel;
+    bannerText->setTextFormat(Qt::PlainText);  // shows server/plugin text
     bannerText->setWordWrap(true);
     bannerText->setTextInteractionFlags(Qt::TextSelectableByMouse);
     auto *bannerClose = new QToolButton;
@@ -816,6 +818,7 @@ App::App() : proxy(new ItemProxy) {
 
     // per-server state, small and muted at the bottom
     serverLine = new QLabel;
+    serverLine->setTextFormat(Qt::PlainText);  // shows server/plugin text
     serverLine->setTextInteractionFlags(Qt::TextSelectableByMouse);
     QFont small = serverLine->font();
     small.setPointSizeF(small.pointSizeF() * 0.9);
@@ -1378,6 +1381,7 @@ void App::maintenanceDialog() {
     table->setSortingEnabled(true);
     lay->addWidget(table, 1);
     auto *status = new QLabel;
+    status->setTextFormat(Qt::PlainText);
     auto *enableBtn = new QPushButton("Enable checks of selected");
     enableBtn->setToolTip("Take the selected hosts out of maintenance (with a fresh check)");
     enableBtn->setEnabled(false);
@@ -1454,19 +1458,11 @@ void App::recheckHostServices(const QVector<Item> &items) {
     }
 }
 
-static QString shellQuote(QString v) {
-    return "'" + v.replace("'", "'\\''") + "'";
-}
-
 void App::runAction(const CustomAction &a, const Item &i) {
     ThrukServer *s = serverOf(i);
-    QString cmd = a.command;
     // values are quoted: host names or plugin output must never become shell code
-    cmd.replace("$HOST$", shellQuote(i.host))
-        .replace("$SERVICE$", shellQuote(i.service))
-        .replace("$STATUS-INFO$", shellQuote(i.output))
-        .replace("$USERNAME$", shellQuote(s ? s->conf.user : QString()))
-        .replace("$SERVER$", shellQuote(i.server));
+    QString cmd = expandCommand(a.command, {{"HOST", i.host}, {"SERVICE", i.service}, {"STATUS-INFO", i.output},
+                                            {"USERNAME", s ? s->conf.user : QString()}, {"SERVER", i.server}});
     if (!a.terminal) {
         QProcess::startDetached("/bin/sh", {"-c", cmd});
         return;
@@ -1507,7 +1503,8 @@ void App::checkForUpdates(bool quiet) {
         updateBtn->setEnabled(true);
         QJsonObject o = QJsonDocument::fromJson(r->readAll()).array().at(0).toObject();
         QString latest = o["sha"].toString().left(12), mine = NAFTAMON_COMMIT;
-        bool failed = r->error() != QNetworkReply::NoError || latest.isEmpty();
+        static const QRegularExpression commitId("^[0-9a-f]{12}$");  // goes into the update shell command
+        bool failed = r->error() != QNetworkReply::NoError || !commitId.match(latest).hasMatch();
         bool newer = !failed && !(latest.startsWith(mine.left(12)) && mine != "unknown");
         if (!failed) latestCommit = newer ? latest : QString();
         updateBtn->setText(latestCommit.isEmpty() ? "Check for updates" : "Update available");
@@ -1545,7 +1542,7 @@ void App::runUpdate(const QString &latest) {
     QString cmd = QString("set -e; d=\"$HOME/.cache/naftamon-update\"; rm -rf \"$d\"; mkdir -p \"$d\"; "
                           "{ curl -fsSL %1 || wget -qO- %1; } | tar xz -C \"$d\"; "
                           "NAFTAMON_COMMIT=%2 sh \"$d\"/naftamon-main/install.sh --update --no-restart")
-                      .arg(url, latest);  // latest is hex from GitHub, url is a constant
+                      .arg(url, latest);  // latest: 12 hex digits (checked), url: a constant
     auto *proc = new QProcess(this);
     proc->setProcessChannelMode(QProcess::MergedChannels);
     auto *dlg = new QProgressDialog("Downloading…", "Cancel", 0, 0, window);  // 0,0 = busy until the build starts
@@ -1826,6 +1823,7 @@ bool App::editServer(ServerConf &s, const QStringList &taken, const QString &tit
     auto *backendList = new QListWidget;
     backendList->setMaximumHeight(backendList->fontMetrics().height() * 9);
     auto *backendNote = new QLabel("Enter URL and login, then press Load.");
+    backendNote->setTextFormat(Qt::PlainText);
     backendNote->setWordWrap(true);
     auto *backendIds = new QLineEdit(s.disabledBackends);
     backendIds->setPlaceholderText("comma separated ids of the backends to hide");
@@ -1847,6 +1845,13 @@ bool App::editServer(ServerConf &s, const QStringList &taken, const QString &tit
     disp->setChecked(s.useDisplayNameService);
     f->addRow("Name:", name);
     f->addRow("Monitor CGI URL:", url);
+    auto *httpWarn = new QLabel("⚠ http:// sends the username and password readable over the network "
+                                "(every request). Use https:// if your Thruk offers it.");
+    httpWarn->setWordWrap(true);
+    auto showHttpWarn = [=] { httpWarn->setVisible(url->text().trimmed().startsWith("http://", Qt::CaseInsensitive)); };
+    connect(url, &QLineEdit::textChanged, &d, showHttpWarn);
+    showHttpWarn();
+    f->addRow(httpWarn);
     f->addRow("Username:", user);
     f->addRow("Password:", pass);
     auto *backendBox = new QVBoxLayout;
@@ -2305,6 +2310,7 @@ bool App::importNagstamon(AppConfig &into, bool silentIfNothing, QString dir) {
     if (!main.isEmpty()) lines << "• filter and notification settings (update interval stays at Naftamon's)";
     if (!skipped.isEmpty()) lines << "Not imported: " + skipped.join(", ");
     auto *text = new QLabel(lines.join('\n'));
+    text->setTextFormat(Qt::PlainText);
     text->setWordWrap(true);
     lay->addWidget(text);
     auto *merge = new QCheckBox("Merge the same Thruk added more than once into one server: " + merges.join(", ") +

@@ -37,6 +37,12 @@ static void coreTests() {
     CHECK(nagstamonDeobfuscate("eJwFwdEKwiAUANBP6lor9NEpQTlNYxE+rpG0oFmYOe/Xdw7AY79I16rz7/Oe6vNURFJwoQU9W5CLOvRss6WKhBVmb2kS1kR/o2siMJVJpddAVXT64GXN13nUuEvRB2G5YWS0RLXBQNdpyICZul7zmemmkQncF+vx/gfTYCqB") == "pä ss\\w0rd");
     CHECK(nagstamonDeobfuscate("plain old password").isEmpty());
 
+    // plugin output is attacker-controlled: it must stay one quoted argument, even when it contains
+    // quotes or another placeholder's name
+    QString evil = "x'; touch /tmp/pwn; echo '$SERVER$";
+    CHECK(expandCommand("ssh $HOST$ $STATUS-INFO$ $SERVER$", {{"HOST", "h1"}, {"STATUS-INFO", evil}, {"SERVER", "a b"}}) ==
+          "ssh 'h1' 'x'\\''; touch /tmp/pwn; echo '\\''$SERVER$' 'a b'");
+
     RawStatus raw;
     Item down; down.server = "s"; down.host = "h1"; down.state = DOWN; down.ack = true;
     raw.hosts = {down};

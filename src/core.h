@@ -41,6 +41,10 @@ QString deobfuscate(const QString &obfuscated);  // empty if the input is not va
 // Nagstamon's own deobfuscate() (Python zlib framing), for importing its config; empty if not valid
 QString nagstamonDeobfuscate(const QString &obfuscated);
 
+// Custom action command: $HOST$, $SERVICE$, $STATUS-INFO$, $USERNAME$, $SERVER$ replaced by the
+// shell-quoted values, in one pass (a value is never scanned again for placeholders).
+QString expandCommand(const QString &command, const QHash<QString, QString> &values);
+
 // Nagstamon's human_readable_duration_from_timestamp()
 QString humanDuration(qint64 since, qint64 now);
 
