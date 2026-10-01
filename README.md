@@ -68,6 +68,9 @@ submit check result, copy. Floating status bar, tray icon, sound, flashing, desk
   of the row badges.
 * Search box (Ctrl+F, Esc clears), shortcuts R (recheck), A (acknowledge), D (downtime), F5 (refresh).
 * Recheck all services on host (`cmd_typ=17`, forced), remove acknowledgement (`cmd_typ=51/52`).
+* Maintenance (right-click a host): disable / enable the active checks of the host and all its services (`cmd_typ=16/15`
+  with the host's own check), optional comment stored on the host. The **Maintenance** button lists every host with
+  checks disabled (`hostprops=16`), so forgotten ones are easy to spot and re-enable.
 * Acknowledge with expiry (`use_expire` + `expire_time`); only honoured if the core supports expiring acks (Naemon, Icinga).
 * Custom actions (Settings → Actions), default "SSH" = `ssh $HOST$` in a terminal. Placeholders are shell-quoted
   (Nagstamon inserts them raw). Terminal: `$TERMINAL`, else konsole, gnome-terminal, kgx, xfce4-terminal, alacritty,

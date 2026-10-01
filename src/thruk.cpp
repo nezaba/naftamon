@@ -189,8 +189,16 @@ void ThrukServer::login(std::function<void(bool)> done) {
 }
 
 // REST /r/sites (Thruk >= 2.24) lists every backend, whatever the thruk_backends cookie says.
+void ThrukServer::whenLoggedIn(std::function<void()> go, std::function<void(QString)> fail) {
+    if (loggedIn) return go();
+    login([this, go, fail](bool ok) {
+        if (ok) go();
+        else fail(error);
+    });
+}
+
 void ThrukServer::fetchBackends(std::function<void(QVector<Backend>, QString)> done) {
-    auto go = [this, done] {
+    whenLoggedIn([this, done] {
         QString base = conf.cgiUrl();
         base.chop(8);  // "/cgi-bin"
         QNetworkReply *r = get(base + "/r/sites");
@@ -202,12 +210,25 @@ void ThrukServer::fetchBackends(std::function<void(QVector<Backend>, QString)> d
             done(list, r->error() != QNetworkReply::NoError ? replyError(r)
                        : list.isEmpty() ? QString("no backend list in the answer") : QString());
         });
-    };
-    if (loggedIn) return go();
-    login([this, go, done](bool ok) {
-        if (ok) go();
-        else done({}, error);
-    });
+    }, [done](const QString &e) { done({}, e); });
+}
+
+// hostprops=16: hosts whose active checks are disabled
+void ThrukServer::fetchDisabledHosts(std::function<void(QVector<Item>, QString)> done) {
+    whenLoggedIn([this, done] {
+        QNetworkReply *r = get(conf.cgiUrl() +
+                               "/status.cgi?hostgroup=all&style=hostdetail&hostprops=16&view_mode=json&entries=all"
+                               "&columns=name,state,last_check,last_state_change,plugin_output,current_attempt,"
+                               "max_check_attempts,active_checks_enabled,notifications_enabled,is_flapping,"
+                               "acknowledged,scheduled_downtime_depth,state_type,peer_name");
+        connect(r, &QNetworkReply::finished, this, [this, r, done] {
+            r->deleteLater();
+            QVector<Item> list;
+            if (r->error() != QNetworkReply::NoError) return done({}, replyError(r));
+            if (!parseStatusJson(r->readAll(), true, conf.name, false, &list)) return done({}, "unexpected answer from Thruk");
+            done(list, {});
+        });
+    }, [done](const QString &e) { done({}, e); });
 }
 
 void ThrukServer::refresh() {
@@ -417,6 +438,29 @@ void ThrukServer::recheckHostServices(const Item &item, const QVector<Item> &ser
     for (const Item &s : services) addPending(s);
     fetchForm(host, 17, [=](CmdForm f) {
         sendCmd(host, 17, {{"start_time", f.startTime}, {"force_check", "on"}});
+    });
+}
+
+// "Maintenance" the way many teams script it: all active checks of a host off (cmd 16 with the
+// host's own check: ahas) or on again (cmd 15), then fresh results for the host and its services.
+void ThrukServer::setHostChecks(const Item &item, bool enable, const QString &comment) {
+    Item host = item;
+    host.service.clear();
+    host.realService.clear();
+    host.passive = false;  // recheck() skips passive items
+    if (enable) {
+        withToken(host, 15, [=] {
+            sendCmd(host, 15, {{"ahas", "on"}});
+            recheck(host);
+            recheckHostServices(host, {});
+        });
+        return;
+    }
+    withToken(host, 16, [=] {
+        // com_data_disable_cmd is used when Thruk has require_comments_for_disable_cmds on
+        sendCmd(host, 16, {{"ahas", "on"}, {"com_data_disable_cmd", comment}});
+        if (!comment.isEmpty())  // who and why, visible on the host in Thruk
+            sendCmd(host, 1, {{"com_author", conf.user}, {"com_data", "Maintenance: " + comment}, {"persistent", "on"}});
     });
 }
 

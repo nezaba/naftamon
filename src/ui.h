@@ -181,6 +181,8 @@ private:
     void recheck(QVector<Item> items);
     bool rebuildQueued = false;
     void recheckHostServices(const QVector<Item> &items);
+    void setMaintenance(const QVector<Item> &items, bool enable);  // all checks of their hosts off / on
+    void maintenanceDialog();
     void runAction(const CustomAction &a, const Item &i);
     bool openInTerminal(const QString &cmd);
     // quiet: automatic check (start, daily), only speaks up when there is a new version

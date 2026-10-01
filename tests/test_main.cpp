@@ -221,6 +221,29 @@ static void thrukTests(const QString &url) {
         std::printf("recheck all services on host -> gone in %lld ms\n", (long long)t.elapsed());
         CHECK(mockStats(url)["cmd"].toObject()["17"].toObject()["force_check"].toString() == "on");
     }
+    // maintenance: all checks of a host off (listed as disabled, comment added), then on again
+    Item maint;
+    maint.server = "m";
+    maint.host = "maint01";
+    auto disabledHosts = [&] {
+        QVector<Item> got;
+        bool answered = false;
+        s.fetchDisabledHosts([&](QVector<Item> l, QString) { got = l; answered = true; });
+        waitFor(s, [&] { return answered; }, 3000);
+        return got;
+    };
+    CHECK(disabledHosts().isEmpty());
+    s.setHostChecks(maint, false, "kernel update");
+    CHECK(waitFor(s, [&] { return mockStats(url)["cmd"].toObject().contains("1"); }, 3000));
+    QJsonObject cmds = mockStats(url)["cmd"].toObject();
+    CHECK(cmds["16"].toObject()["ahas"].toString() == "on");
+    CHECK(cmds["1"].toObject()["com_data"].toString() == "Maintenance: kernel update");
+    QVector<Item> dis = disabledHosts();
+    CHECK(dis.size() == 1 && dis[0].host == "maint01" && dis[0].passive && dis[0].backend == "alpha");
+    s.setHostChecks(dis.value(0, maint), true);
+    CHECK(waitFor(s, [&] { return mockStats(url)["cmd"].toObject().contains("15"); }, 3000));
+    CHECK(waitFor(s, [&] { return disabledHosts().isEmpty(); }, 3000));
+
     CHECK(failed.isEmpty());
     if (!failed.isEmpty()) std::fprintf(stderr, "command failed: %s\n", qPrintable(failed));
 

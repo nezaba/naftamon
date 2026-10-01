@@ -17,6 +17,7 @@
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QInputDialog>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -704,6 +705,8 @@ App::App() : proxy(new ItemProxy) {
     };
     auto *refreshBtn = tool("view-refresh", "Refresh", "Poll all servers now (F5)");
     auto *recheckAllBtn = tool("system-run", "Recheck all", "Recheck every listed problem");
+    auto *maintBtn = tool("media-playback-pause", "Maintenance", "Hosts with all checks disabled (maintenance)");
+    connect(maintBtn, &QToolButton::clicked, this, &App::maintenanceDialog);
     auto *settingsBtn = tool("configure", "Settings", "Servers, filters, notifications, actions");
     if (settingsBtn->icon().isNull()) settingsBtn->setIcon(QIcon::fromTheme("preferences-system"));
     v->addLayout(top);
@@ -1304,6 +1307,18 @@ void App::contextMenu(const QPoint &pos) {
     m.addAction(icon("dialog-ok-apply"), "Acknowledge…\tA", [=] { acknowledgeDialog(items); });
     m.addAction(icon("appointment-new"), "Downtime…\tD", [=] { downtimeDialog(items); });
     if (items.size() == 1) m.addAction("Submit check result…", [=] { submitDialog(items[0]); });
+    // maintenance acts on the hosts of the selected rows; "P" on a host = its checks are disabled
+    auto hostChecksOff = [](const Item &i) { return i.isHost() ? i.passive : i.hostInfo.passive; };
+    QStringList hosts;
+    for (const Item &i : items)
+        if (!hosts.contains(i.host)) hosts << i.host;
+    QString which = hosts.size() == 1 ? hosts[0] : QString("%1 hosts").arg(hosts.size());
+    if (std::all_of(items.begin(), items.end(), hostChecksOff))
+        m.addAction(icon("media-playback-start"), "Maintenance: enable all checks of " + which,
+                    [=] { setMaintenance(items, true); });
+    else
+        m.addAction(icon("media-playback-pause"), "Maintenance: disable all checks of " + which + "…",
+                    [=] { setMaintenance(items, false); });
     if (std::any_of(items.begin(), items.end(), [](const Item &i) { return i.ack; }))
         m.addAction(icon("edit-undo"), "Remove acknowledgement", [=] {
             for (const Item &i : items)
@@ -1321,6 +1336,105 @@ void App::contextMenu(const QPoint &pos) {
     copy("Copy service", [](const Item &i) { return i.service; });
     copy("Copy status information", [](const Item &i) { return i.output; });
     m.exec(view->viewport()->mapToGlobal(pos));
+}
+
+// One command per server + host. Disabling asks for a comment, stored on the host in Thruk.
+void App::setMaintenance(const QVector<Item> &items, bool enable) {
+    QString comment;
+    if (!enable) {
+        bool ok = false;
+        comment = QInputDialog::getText(window, "Maintenance",
+                                        "Disable the active checks of the host and all its services until they are "
+                                        "enabled again (Maintenance button lists them).\n\nComment, saved on the host "
+                                        "in Thruk (optional):",
+                                        QLineEdit::Normal, "maintenance", &ok);
+        if (!ok) return;
+    }
+    QSet<QString> done;
+    for (const Item &i : items) {
+        ThrukServer *s = serverOf(i);
+        if (!s || done.contains(i.server + '\t' + i.host)) continue;
+        done.insert(i.server + '\t' + i.host);
+        s->setHostChecks(i, enable, comment.trimmed());
+    }
+}
+
+// Hosts whose active checks are disabled, from every server: the ones nobody re-enabled stand out.
+void App::maintenanceDialog() {
+    QDialog d(window);
+    d.setWindowTitle("Hosts in maintenance");
+    d.resize(760, 420);
+    auto *lay = new QVBoxLayout(&d);
+    auto *note = new QLabel("Hosts with active checks disabled: in maintenance, or hosts that only receive passive "
+                            "results.");
+    note->setWordWrap(true);
+    lay->addWidget(note);
+    auto *table = new QTableWidget(0, 4);
+    table->setHorizontalHeaderLabels({"Backend", "Host", "Last check", "Status information"});
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->verticalHeader()->hide();
+    table->horizontalHeader()->setStretchLastSection(true);
+    table->setSortingEnabled(true);
+    lay->addWidget(table, 1);
+    auto *status = new QLabel;
+    auto *enableBtn = new QPushButton("Enable all checks");
+    enableBtn->setToolTip("Take the selected hosts out of maintenance (with a fresh check)");
+    auto *reload = new QPushButton("Reload");
+    auto *close = new QPushButton("Close");
+    auto *row = new QHBoxLayout;
+    row->addWidget(status, 1);
+    row->addWidget(enableBtn);
+    row->addWidget(reload);
+    row->addWidget(close);
+    lay->addLayout(row);
+    connect(close, &QPushButton::clicked, &d, &QDialog::accept);
+
+    QVector<Item> rows;
+    auto alive = std::make_shared<bool>(true);  // replies may arrive after the dialog is gone
+    auto load = [&] {
+        rows.clear();
+        table->setRowCount(0);
+        status->setText("Loading…");
+        auto left = std::make_shared<int>(servers.size());
+        auto errors = std::make_shared<QStringList>();
+        for (ThrukServer *s : servers)
+            s->fetchDisabledHosts([&, s, alive, left, errors](QVector<Item> list, QString error) {
+                if (!*alive) return;
+                if (!error.isEmpty()) *errors << s->conf.name + ": " + error;
+                rows += list;
+                if (--*left) return;
+                table->setSortingEnabled(false);
+                table->setRowCount(rows.size());
+                const qint64 now = QDateTime::currentSecsSinceEpoch();
+                for (int r = 0; r < rows.size(); ++r) {
+                    const Item &i = rows[r];
+                    auto *b = new QTableWidgetItem(model.multiServer ? i.server + " · " + i.backend : i.backend);
+                    b->setData(Qt::UserRole, r);  // index into rows, survives sorting
+                    table->setItem(r, 0, b);
+                    table->setItem(r, 1, new QTableWidgetItem(i.host));
+                    table->setItem(r, 2, new QTableWidgetItem(relativeTime(i.lastCheck, now)));
+                    table->setItem(r, 3, new QTableWidgetItem(i.output));
+                }
+                table->setSortingEnabled(true);
+                table->resizeColumnsToContents();
+                status->setText(QString("%1 host(s)").arg(rows.size()) +
+                                (errors->isEmpty() ? QString() : "   ⚠ " + errors->join("; ")));
+            });
+        if (servers.isEmpty()) status->setText("No server configured.");
+    };
+    connect(reload, &QPushButton::clicked, &d, load);
+    connect(enableBtn, &QPushButton::clicked, &d, [&] {
+        QVector<Item> picked;
+        for (const QModelIndex &idx : table->selectionModel()->selectedRows())
+            picked << rows[table->item(idx.row(), 0)->data(Qt::UserRole).toInt()];
+        if (picked.isEmpty()) return;
+        setMaintenance(picked, true);
+        status->setText(QString("Checks enabled for %1 host(s); Reload to update the list.").arg(picked.size()));
+    });
+    load();
+    d.exec();
+    *alive = false;
 }
 
 void App::recheckHostServices(const QVector<Item> &items) {

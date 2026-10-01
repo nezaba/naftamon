@@ -37,6 +37,9 @@ public:
     void refresh();
     // every backend of this Thruk, disabled or not; error is empty on success
     void fetchBackends(std::function<void(QVector<Backend>, QString error)> done);
+    void fetchDisabledHosts(std::function<void(QVector<Item>, QString error)> done);  // "in maintenance"
+    // all active checks of the item's host off / on (on: also forces fresh checks)
+    void setHostChecks(const Item &item, bool enable, const QString &comment = {});
     void recheck(const Item &item);
     // SCHEDULE_FORCED_HOST_SVC_CHECKS; services = the host's services we list, followed up like rechecks
     void recheckHostServices(const Item &item, const QVector<Item> &services);
@@ -70,6 +73,7 @@ private:
     QNetworkReply *get(const QString &url);
     QNetworkReply *post(const QString &url, const QByteArray &body);
     void login(std::function<void(bool)> done);
+    void whenLoggedIn(std::function<void()> go, std::function<void(QString)> fail);
     void finishPoll(QNetworkReply *hosts, QNetworkReply *services, qint64 started);
     void sendCmd(const Item &item, int cmdTyp, QList<QPair<QString, QString>> params,
                  std::function<void()> done = {});

@@ -33,6 +33,11 @@ hosts = {
                   active_checks_enabled=1, notifications_enabled=1, is_flapping=0, acknowledged=0,
                   scheduled_downtime_depth=0, state_type=1, host_display_name='web01', display_name='web01',
                   peer_key='a1', peer_name='alpha'),
+    'maint01': dict(name='maint01', state=0, last_check=now() - 30, last_state_change=now() - 9000,
+                    plugin_output='PING OK', current_attempt=1, max_check_attempts=3, active_checks_enabled=1,
+                    notifications_enabled=1, is_flapping=0, acknowledged=0, scheduled_downtime_depth=0,
+                    state_type=1, host_display_name='maint01', display_name='maint01', peer_key='a1',
+                    peer_name='alpha'),
 }
 services = {
     ('db01', 'disk'): svc('db01', 'disk', 2),
@@ -103,7 +108,9 @@ class H(BaseHTTPRequestHandler):
                         data = [s for s in services.values() if s['host_name'] == host]
                 else:
                     stats['full'] += 1
-                    if q.get('style') == ['hostdetail']:
+                    if q.get('hostprops') == ['16']:  # hosts with active checks disabled
+                        data = [h for h in hosts.values() if h['active_checks_enabled'] == 0]
+                    elif q.get('style') == ['hostdetail']:
                         assert q.get('hoststatustypes') == ['12']
                         data = [h for h in hosts.values() if h['state'] != 0]
                     else:
@@ -136,8 +143,8 @@ class H(BaseHTTPRequestHandler):
             if p.get('CSRFtoken') != TOKEN:
                 return self.send(200, '<html>possible csrf, no or invalid token</html>')
             typ, host, service = int(p['cmd_typ']), p.get('host'), p.get('service')
-            key = host if typ in (96, 33, 55, 87, 51, 17) else (host, service)
-            is_host = typ in (96, 33, 55, 87, 51)
+            key = host if typ in (96, 33, 55, 87, 51, 17, 15, 16, 1) else (host, service)
+            is_host = typ in (96, 33, 55, 87, 51, 15, 16, 1)
             with lock:
                 stats['cmd'][str(typ)] = p
                 if typ == 17:
@@ -146,6 +153,11 @@ class H(BaseHTTPRequestHandler):
                 obj = hosts.get(key) if is_host else services.get(key)
                 if obj is None:
                     return self.send(200, json.dumps({'success': 0, 'error': 'no such object'}), 'application/json')
+                if typ in (15, 16):  # host's service checks (+ the host's own with ahas)
+                    on = int(typ == 15)
+                    for k, v in services.items():
+                        if k[0] == host: v['active_checks_enabled'] = on
+                    if p.get('ahas'): obj['active_checks_enabled'] = on
                 if typ in (33, 34): obj['acknowledged'] = 1
                 if typ in (51, 52): obj['acknowledged'] = 0
                 if typ in (55, 56): obj['scheduled_downtime_depth'] = 1
