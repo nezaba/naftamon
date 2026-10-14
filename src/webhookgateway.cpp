@@ -24,9 +24,7 @@ void WebhookGateway::setServers(const QVector<ThrukServer *> &servers) {
 void WebhookGateway::configure(bool enabled, const QString &url, int intervalSeconds) {
     const QUrl nextUrl(url.trimmed());
     const int nextInterval = qBound(1, intervalSeconds, 86400);
-    const bool valid = (nextUrl.scheme() == "http" || nextUrl.scheme() == "https") &&
-                       !nextUrl.host().isEmpty() && nextUrl.userInfo().isEmpty();
-    const bool nextEnabled = enabled && valid;
+    const bool nextEnabled = enabled && isValidUrl(url);
     if (enabled_ == nextEnabled && url_ == nextUrl && intervalSeconds_ == nextInterval) return;
     cancelInFlight();
     timer_.stop();
@@ -39,11 +37,18 @@ void WebhookGateway::configure(bool enabled, const QString &url, int intervalSec
     }
 }
 
+bool WebhookGateway::isValidUrl(const QString &url) {
+    const QUrl target(url.trimmed());
+    return (target.scheme() == "http" || target.scheme() == "https") &&
+           !target.host().isEmpty() && target.userInfo().isEmpty();
+}
+
 void WebhookGateway::cancelInFlight() {
     if (!inFlight_) return;
     QNetworkReply *reply = inFlight_;
     inFlight_ = nullptr;
     reply->abort();
+    emit requestFinished(QDateTime::currentDateTime(), false, 0, "Cancelled", QString());
 }
 
 static QJsonObject alertJson(const Item &item) {
@@ -82,22 +87,48 @@ QJsonObject WebhookGateway::snapshot() const {
 
 void WebhookGateway::sendNow() {
     if (!enabled_ || inFlight_) return;
-    QNetworkRequest request(url_);
+    post(url_, snapshot(), false);
+}
+
+bool WebhookGateway::testWebhook(const QString &url) {
+    if (!isValidUrl(url) || testInFlight_) return false;
+    const QJsonObject payload{{"type", "test"}, {"test", true},
+                              {"source", "NaftaMon"},
+                              {"timestamp", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+                              {"message", "NaftaMon test webhook"}};
+    return post(QUrl(url.trimmed()), payload, true);
+}
+
+bool WebhookGateway::post(const QUrl &url, const QJsonObject &payload, bool test) {
+    QPointer<QNetworkReply> &active = test ? testInFlight_ : inFlight_;
+    if (active) return false;
+    QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json; charset=utf-8");
     request.setHeader(QNetworkRequest::UserAgentHeader, "NaftaMon WebhookGateway");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     request.setTransferTimeout(timeoutMs_);
-    QNetworkReply *reply = network_.post(request, QJsonDocument(snapshot()).toJson(QJsonDocument::Compact));
-    inFlight_ = reply;
+    QNetworkReply *reply = network_.post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    active = reply;
     QTimer::singleShot(timeoutMs_, reply, [reply] { if (reply->isRunning()) reply->abort(); });
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, test] {
         reply->deleteLater();
-        if (inFlight_ != reply) return;
-        inFlight_ = nullptr;
+        QPointer<QNetworkReply> &current = test ? testInFlight_ : inFlight_;
+        if (current != reply) return;
+        current = nullptr;
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (reply->error() == QNetworkReply::NoError && status >= 200 && status < 300)
-            emit delivered(status);
-        else
-            emit deliveryFailed(status);
+        const bool success = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300;
+        const QString error = success ? QString() :
+            reply->error() == QNetworkReply::NoError ? QString("HTTP %1").arg(status) : reply->errorString();
+        QString response;
+        if (test && reply->isReadable()) {
+            response = QString::fromUtf8(reply->read(4096)).trimmed();
+            if (reply->bytesAvailable() > 0) response += "… (truncated)";
+        }
+        emit requestFinished(QDateTime::currentDateTime(), test, status, error, response);
+        if (!test) {
+            if (success) emit delivered(status);
+            else emit deliveryFailed(status);
+        }
     });
+    return true;
 }

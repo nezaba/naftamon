@@ -4,7 +4,7 @@
 #include "../src/thruk.h"
 #include "../src/webhookgateway.h"
 #include "../src/ui.h"
-#include <QCoreApplication>
+#include <QApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -16,6 +16,15 @@
 #include <QNetworkReply>
 #include <QTemporaryDir>
 #include <QSettings>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSpinBox>
+#include <QTableView>
+#include <QToolButton>
 #include <cstdio>
 #include <cstdlib>
 
@@ -292,6 +301,43 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > stoppedAt; }, 1300));
     CHECK(!gateway.isEnabled());
 
+    CHECK(!WebhookGateway::isValidUrl(""));
+    CHECK(!WebhookGateway::isValidUrl("ftp://webhooks/webhook"));
+    CHECK(!WebhookGateway::isValidUrl("http://user:password@webhooks/webhook"));
+    CHECK(WebhookGateway::isValidUrl(sinkUrl));
+    int testDone = 0, testStatus = -1;
+    QString testError;
+    QString testResponse;
+    QObject::connect(&gateway, &WebhookGateway::requestFinished, &gateway,
+                     [&](const QDateTime &when, bool test, int status, const QString &error,
+                         const QString &response) {
+        if (!test) return;
+        CHECK(when.isValid());
+        ++testDone;
+        testStatus = status;
+        testError = error;
+        testResponse = response;
+    });
+    CHECK(!gateway.testWebhook("invalid URL"));
+    CHECK(gateway.testWebhook(sinkUrl));  // test works even while periodic delivery is disabled
+    CHECK(waitUntil([&] { return testDone == 1; }, 1500));
+    CHECK(testStatus == 202 && testError.isEmpty() && testResponse.contains("received"));
+    payload = receivedWebhooks(base).last().toObject();
+    CHECK(payload.value("type") == "test" && payload.value("test") == true);
+    CHECK(payload.value("source") == "NaftaMon" && !payload.contains("alerts"));
+    CHECK(!QJsonDocument(payload).toJson().contains("secret"));
+    CHECK(gateway.testWebhook(sinkUrl + "?status=500"));
+    CHECK(waitUntil([&] { return testDone == 2; }, 1500));
+    CHECK(testStatus == 500 && !testError.isEmpty() && testResponse.contains("received"));
+    CHECK(gateway.testWebhook("http://127.0.0.1:1/webhook"));
+    CHECK(waitUntil([&] { return testDone == 3; }, 1500));
+    CHECK(testStatus == 0 && !testError.isEmpty());
+    CHECK(gateway.testWebhook(sinkUrl + "?delay=2&status=500"));
+    CHECK(!gateway.testWebhook(sinkUrl));  // at most one manual test request in progress
+    CHECK(waitUntil([&] { return testDone == 4; }, 1500));
+    CHECK(testStatus == 0 && !testError.isEmpty());
+    CHECK(!gateway.isEnabled());
+
     ThrukServer bulk(ServerConf{"bulk", thrukUrl, "admin", "secret", {}});
     bulk.hasData = true;
     for (int n = 0; n < 7000; ++n) {
@@ -317,6 +363,131 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore + 1; }, 1300));
     slow.configure(false, sinkUrl, 1);
     CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore + 1; }, 1200));
+}
+
+static void gatewayUiTests(const QString &thrukUrl, const QString &sinkUrl) {
+    QTemporaryDir directory;
+    CHECK(directory.isValid());
+    const QByteArray oldPath = qgetenv("NAFTAMON_CONFIG");
+    qputenv("NAFTAMON_CONFIG", (directory.path() + "/ui.ini").toUtf8());
+    AppConfig initial;
+    initial.servers.append(ServerConf{"ui-mock", thrukUrl, "admin", "secret", {}});
+    initial.floatingBar = false;
+    initial.showAtStart = true;
+    initial.notify = false;
+    initial.sound = false;
+    initial.save();
+    QUrl receivedUrl(sinkUrl);
+    receivedUrl.setPath("");
+    receivedUrl.setQuery(QString());
+    const QString base = receivedUrl.toString();
+    {
+        App app;
+        QWidget *window = nullptr;
+        for (QWidget *candidate : QApplication::topLevelWidgets())
+            if (candidate->findChild<QToolButton *>("gatewayToggle")) window = candidate;
+        CHECK(window != nullptr);
+        if (window) {
+            auto *toggle = window->findChild<QToolButton *>("gatewayToggle");
+            auto *settings = window->findChild<QToolButton *>("gatewaySettings");
+            auto *last = window->findChild<QLabel *>("gatewayLastResult");
+            auto *table = window->findChild<QTableView *>();
+            CHECK(toggle && settings && last && table);
+            if (toggle && settings && last && table) {
+                CHECK(!toggle->isChecked() && toggle->text().contains("Disabled"));
+                CHECK(waitUntil([&] { return table->model()->rowCount() == 4; }, 3000));
+                const int rows = table->model()->rowCount();
+                QTimer::singleShot(0, &app, [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    CHECK(dialog && dialog->objectName() == "gatewayDialog");
+                    if (!dialog) return;
+                    auto *url = dialog->findChild<QLineEdit *>("gatewayUrl");
+                    auto *interval = dialog->findChild<QSpinBox *>("gatewayInterval");
+                    auto *test = dialog->findChild<QPushButton *>("gatewayTest");
+                    auto *result = dialog->findChild<QPlainTextEdit *>("gatewayTestResult");
+                    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+                    CHECK(url && interval && test && result && buttons);
+                    if (!url || !interval || !test || !result || !buttons) { dialog->reject(); return; }
+                    url->setText(sinkUrl);
+                    interval->setValue(1);
+                    test->click();
+                    CHECK(!test->isEnabled() && result->toPlainText().contains("Sending"));
+                    CHECK(waitUntil([&] { return result->toPlainText().contains("HTTP 202"); }, 2000));
+                    CHECK(result->toPlainText().contains("Response:") && result->toPlainText().contains("received"));
+                    CHECK(result->maximumHeight() <= 120 && result->isReadOnly());
+                    CHECK(test->isEnabled());
+                    const QString shot = qEnvironmentVariable("GATEWAY_DIALOG_SCREENSHOT");
+                    if (!shot.isEmpty()) CHECK(dialog->grab().save(shot));
+                    url->setText(sinkUrl + "?status=500");
+                    test->click();
+                    CHECK(waitUntil([&] { return result->toPlainText().contains("HTTP 500"); }, 2000));
+                    CHECK(result->toPlainText().contains("Response:") && result->toPlainText().contains("received"));
+                    url->setText(sinkUrl);
+                    buttons->button(QDialogButtonBox::Save)->click();
+                });
+                settings->click();
+                AppConfig saved;
+                saved.load();
+                CHECK(saved.webhookUrl == sinkUrl && saved.webhookIntervalSeconds == 1);
+                CHECK(!saved.webhookEnabled && last->text().contains("Test: HTTP 500"));
+                QJsonObject testPayload = receivedWebhooks(base).last().toObject();
+                CHECK(testPayload.value("test") == true && testPayload.value("type") == "test");
+                QTimer::singleShot(0, &app, [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    CHECK(dialog != nullptr);
+                    if (!dialog) return;
+                    dialog->findChild<QLineEdit *>("gatewayUrl")->setText(sinkUrl + "?delay=0.4&status=500");
+                    dialog->findChild<QPushButton *>("gatewayTest")->click();
+                    dialog->reject();
+                });
+                settings->click();
+                QTimer::singleShot(0, &app, [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    CHECK(dialog != nullptr);
+                    if (!dialog) return;
+                    auto *result = dialog->findChild<QPlainTextEdit *>("gatewayTestResult");
+                    const QString initialText = result->toPlainText();
+                    CHECK(!waitUntil([&] { return result->toPlainText() != initialText; }, 700));
+                    dialog->reject();
+                });
+                settings->click();
+                const int before = sinkStats(base).value("total").toInt();
+                toggle->click();
+                CHECK(toggle->isChecked() && toggle->text().contains("Enabled"));
+                CHECK(waitUntil([&] { return sinkStats(base).value("total").toInt() > before; }, 2000));
+                QJsonObject alertPayload = receivedWebhooks(base).last().toObject();
+                CHECK(alertPayload.value("source") == "NaftaMon" && alertPayload.value("test").isUndefined());
+                CHECK(alertPayload.value("complete") == true && alertPayload.value("alerts").toArray().size() == 4);
+                CHECK(table->model()->rowCount() == rows);  // Gateway does not change the monitor table
+                saved = AppConfig();
+                saved.load();
+                CHECK(saved.webhookEnabled);
+                toggle->click();
+                CHECK(!toggle->isChecked() && toggle->text().contains("Disabled"));
+                const int stoppedAt = sinkStats(base).value("total").toInt();
+                CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > stoppedAt; }, 1200));
+                saved = AppConfig();
+                saved.load();
+                CHECK(!saved.webhookEnabled);
+                CHECK(table->model()->rowCount() == rows);
+                QTimer::singleShot(0, &app, [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    CHECK(dialog != nullptr);
+                    if (!dialog) return;
+                    dialog->findChild<QLineEdit *>("gatewayUrl")->setText(sinkUrl + "?delay=2");
+                    dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+                });
+                settings->click();
+                const int beforeSlow = sinkStats(base).value("total").toInt();
+                toggle->click();
+                CHECK(waitUntil([&] { return sinkStats(base).value("total").toInt() > beforeSlow; }, 1000));
+                toggle->click();
+                CHECK(last->text().contains("Cancelled") && !last->text().contains("Connection error"));
+            }
+        }
+    }
+    if (oldPath.isEmpty()) qunsetenv("NAFTAMON_CONFIG");
+    else qputenv("NAFTAMON_CONFIG", oldPath);
 }
 
 static const Item *find(const ThrukServer &s, const QString &host, const QString &service) {
@@ -463,12 +634,15 @@ static void thrukTests(const QString &url) {
 }
 
 int main(int argc, char **argv) {
-    QCoreApplication app(argc, argv);
+    QApplication app(argc, argv);
+    app.setApplicationName("naftamon-tests");
+    app.setQuitOnLastWindowClosed(false);
     coreTests();
     configTests();
     QString url = qEnvironmentVariable("MOCK_URL");
     QString webhookUrl = qEnvironmentVariable("WEBHOOK_URL");
     if (!url.isEmpty() && !webhookUrl.isEmpty()) webhookTests(url, webhookUrl);
+    if (!url.isEmpty() && !webhookUrl.isEmpty()) gatewayUiTests(url, webhookUrl);
     if (!url.isEmpty()) thrukTests(url);
     std::printf(failures ? "%d FAILURE(S)\n" : "all tests passed\n", failures);
     return failures ? 1 : 0;

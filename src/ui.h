@@ -149,6 +149,7 @@ private:
     StatusModel model;
     ItemProxy *proxy;
     QToolButton *hideAck, *hideDowntime, *hideFlapping, *hideNew;  // quick filters next to search
+    QToolButton *gatewayToggle;
     QToolButton *updateBtn, *bannerUpdate;  // bannerUpdate: "Update" button of the new-version notice
     QString latestCommit;
     QNetworkAccessManager updateNam;
@@ -156,6 +157,7 @@ private:
     QWidget *window;
     QTableView *view;
     QLabel *serverLine;
+    QLabel *gatewayLine;
     QLineEdit *search;
     QLabel *emptyHint, *emptyLogo, *bannerText;
     QFrame *banner;
@@ -172,6 +174,8 @@ private:
     qint64 seenSince = QDateTime::currentSecsSinceEpoch();  // state changes after this are "new"
 
     void applyConfig();
+    void updateGatewayUi();
+    void gatewayDialog();
     // quiet: re-filter without notifying or marking newly visible rows as new (filter changes)
     void rebuild(ThrukServer *updated, bool quiet = false);
     void syncToggles();
