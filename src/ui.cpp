@@ -90,6 +90,7 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
     Filters &f = c.filters;
     return {
         {"floating_bar", &c.floatingBar},
+        {"webhook_enabled", &c.webhookEnabled},
         {"filter_all_down_hosts", &f.allDownHosts},
         {"filter_all_unreachable_hosts", &f.allUnreachableHosts},
         {"filter_all_flapping_hosts", &f.allFlappingHosts},
@@ -141,6 +142,8 @@ void AppConfig::loadSettings(const std::function<QVariant(const QString &, const
         if (!r.second->re.isValid()) r.second->enabled = false;
     }
     intervalSec = qBound(1, get("update_interval_seconds", intervalSec).toInt(), 3600);
+    webhookUrl = get("webhook_url", webhookUrl).toString().trimmed();
+    webhookIntervalSeconds = qBound(1, get("webhook_interval_seconds", webhookIntervalSeconds).toInt(), 86400);
     for (int st = 0; st < STATE_COUNT; ++st) {
         notifyIf[st] = get("notify_if_" + lower(State(st)), notifyIf[st]).toBool();
         customSound[st] = get("notification_custom_sound_" + lower(State(st)), customSound[st]).toString();
@@ -222,6 +225,8 @@ void AppConfig::save() const {
         s.setValue(r.first + "_pattern", r.second->re.pattern());
     }
     s.setValue("update_interval_seconds", intervalSec);
+    s.setValue("webhook_url", webhookUrl);
+    s.setValue("webhook_interval_seconds", webhookIntervalSeconds);
     for (int st = 0; st < STATE_COUNT; ++st) {
         s.setValue("notify_if_" + lower(State(st)), notifyIf[st]);
         s.setValue("notification_custom_sound_" + lower(State(st)), customSound[st]);
@@ -1008,6 +1013,8 @@ void App::applyConfig() {
         s->refresh();
     }
     for (auto *s : old) s->deleteLater();  // removed or changed servers
+    gateway.setServers(servers);
+    gateway.configure(cfg.webhookEnabled, cfg.webhookUrl, cfg.webhookIntervalSeconds);
     model.multiServer = servers.size() > 1;
     view->setColumnHidden(StatusModel::Backend, false);  // was hidden with one server
     if (!cfg.flash) bar->setFlashing(false);  // takes effect now, not only for the next notification

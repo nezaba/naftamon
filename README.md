@@ -39,7 +39,7 @@ Tests (core logic + Thruk client against a mock Thruk): `tests/run.sh`
 
 ## Docker Desktop development lab (Windows 11)
 
-This lab needs Docker Desktop with its WSL2 backend and Linux containers. It does not need a separate Ubuntu installation in WSL2 or access to a live Thruk server. The development image uses Ubuntu 24.04, Qt6 and qmake6. Source files are bind mounted from this repository; `build/` and the test configuration live in Docker volumes, so rebuilds reuse existing objects. The only configured server is the bundled Thruk mock (`admin` / `secret`, test credentials only). The webhook receiver is a JSON logging sink for future integration work; NaftaMon does not send webhooks yet.
+This lab needs Docker Desktop with its WSL2 backend and Linux containers. It does not need a separate Ubuntu installation in WSL2 or access to a live Thruk server. The development image uses Ubuntu 24.04, Qt6 and qmake6. Source files are bind mounted from this repository; `build/` and the test configuration live in Docker volumes, so rebuilds reuse existing objects. The only configured server is the bundled Thruk mock (`admin` / `secret`, test credentials only). The webhook receiver logs Gateway JSON when the engine is enabled; it is off by default.
 
 Run these commands in PowerShell from the repository root:
 
@@ -50,7 +50,7 @@ docker compose -f compose.dev.yaml exec dev bash -lc 'mkdir -p build && cd build
 docker compose -f compose.dev.yaml run --rm -T dev bash tests/run.sh
 ```
 
-The test command is headless and runs the existing mock in normal, `--no-wait`, and `--basic` modes. For a manual Qt6 check, start the compiled application and open [noVNC](http://localhost:6080/vnc.html?autoconnect=1) in a Windows browser:
+The test command is headless and runs the Thruk and Webhook Gateway checks in normal, `--no-wait`, and `--basic` modes. For a manual Qt6 check, start the compiled application and open [noVNC](http://localhost:6080/vnc.html?autoconnect=1) in a Windows browser:
 
 ```powershell
 docker compose -f compose.dev.yaml exec -d dev bash -lc './build/naftamon > /lab-state/naftamon.log 2>&1'
@@ -73,6 +73,20 @@ docker compose -f compose.dev.yaml down
 ```
 
 `down` preserves the build and state volumes. `docker compose -f compose.dev.yaml down -v` deletes those lab volumes and resets the test configuration and compiled objects.
+
+## Webhook Gateway engine
+
+The engine is disabled by default and has no UI controls yet. It reads these keys from NaftaMon's QSettings INI file (in the lab: `/lab-state/config/naftamon.ini`):
+
+```ini
+webhook_enabled=true
+webhook_url=http://webhooks:8080/webhook
+webhook_interval_seconds=60
+```
+
+The interval is clamped to 1–86400 seconds. Edit the INI file and restart NaftaMon to apply these keys. The `WebhookGateway` API also supports enabling, disabling, and changing the URL and interval while the process runs. Disabling aborts an in-flight POST. To inspect received JSON in the lab, use `docker compose -f compose.dev.yaml logs -f webhooks` or `docker compose -f compose.dev.yaml exec dev python3 -c "import urllib.request; print(urllib.request.urlopen('http://webhooks:8080/received').read().decode())"`.
+
+Each POST contains an ISO 8601 UTC `timestamp`, `source: "NaftaMon"`, `complete`, per-server statuses, and an `alerts` array. Alert entries identify the server, backend, host, service, type, state, acknowledgement and downtime flags, and check/change times in UTC. A successful poll with no problems sends `complete: true` and `alerts: []`. A failed or pending poll sends `complete: false` and marks that server `error` or `pending`; its stale cached alerts are excluded. The gateway does not use table, search, state, acknowledgement, or downtime filters. It sends no Thruk URL, username, password, token, or free-form plugin output. Backends excluded in a Thruk server's configuration are absent from that server's poll and therefore absent from the payload. The lab receiver accepts JSON bodies up to 8 MiB and retains the last 10 for test inspection at `/received`; `/stats` exposes request counters.
 
 ## Why it is faster than Nagstamon
 

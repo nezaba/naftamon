@@ -14,6 +14,6 @@ Use `compose.dev.yaml` from the repository root. The `dev` image contains Ubuntu
 5. Check both private services with `docker compose -f compose.dev.yaml exec dev python3 docker/lab-smoke.py` and audit the active test configuration with `docker compose -f compose.dev.yaml exec dev python3 docker/lab-audit.py`. Inspect service output with `docker compose -f compose.dev.yaml logs -f thruk webhooks` and app output with `docker compose -f compose.dev.yaml exec dev cat /lab-state/naftamon.log` when launched as documented in README.
 6. Stop with `docker compose -f compose.dev.yaml down`. Use `down -v` only when intentionally discarding lab builds and configuration.
 
-The `webhooks` service is only an HTTP JSON sink at `http://webhooks:8080/webhook` on the Compose network; it does not implement the future Webhook Gateway. Its received JSON appears in `docker compose logs webhooks`. Neither `webhooks` nor `thruk` publishes a Windows port.
+The `webhooks` service is only an HTTP JSON sink at `http://webhooks:8080/webhook` on the Compose network; the Webhook Gateway engine runs inside NaftaMon. Its received JSON appears in `docker compose logs webhooks`, and recent requests are available at `/received` with counters at `/stats`. Neither `webhooks` nor `thruk` publishes a Windows port.
 
 Before reporting Docker validation, verify the actual build and test result. If Docker Desktop is unavailable, report that explicitly and do not claim container or UI validation.

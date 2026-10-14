@@ -2,6 +2,8 @@
 // (see tests/run.sh, which starts tests/mock_thruk.py).
 #include "../src/core.h"
 #include "../src/thruk.h"
+#include "../src/webhookgateway.h"
+#include "../src/ui.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -9,8 +11,11 @@
 #include <QTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QTemporaryDir>
+#include <QSettings>
 #include <cstdio>
 #include <cstdlib>
 
@@ -105,6 +110,36 @@ static void coreTests() {
     CHECK(!itemLess(l[0], l[0], keys) && !itemLess(l[0], l[1], {}));
 }
 
+static void configTests() {
+    QTemporaryDir directory;
+    CHECK(directory.isValid());
+    const QByteArray oldPath = qgetenv("NAFTAMON_CONFIG");
+    qputenv("NAFTAMON_CONFIG", (directory.path() + "/gateway.ini").toUtf8());
+    AppConfig defaults;
+    defaults.load();
+    CHECK(!defaults.webhookEnabled && defaults.webhookUrl.isEmpty() && defaults.webhookIntervalSeconds == 60);
+    defaults.webhookEnabled = true;
+    defaults.webhookUrl = "http://webhooks:8080/webhook";
+    defaults.webhookIntervalSeconds = 17;
+    defaults.save();
+    AppConfig loaded;
+    loaded.load();
+    CHECK(loaded.webhookEnabled && loaded.webhookUrl == defaults.webhookUrl && loaded.webhookIntervalSeconds == 17);
+    QSettings settings(AppConfig::path(), QSettings::IniFormat);
+    CHECK(settings.value("webhook_enabled").toBool());
+    settings.setValue("webhook_interval_seconds", 999999);
+    settings.sync();
+    AppConfig clamped;
+    clamped.load();
+    CHECK(clamped.webhookIntervalSeconds == 86400);
+    settings.setValue("webhook_interval_seconds", -1);
+    settings.sync();
+    clamped.load();
+    CHECK(clamped.webhookIntervalSeconds == 1);
+    if (oldPath.isEmpty()) qunsetenv("NAFTAMON_CONFIG");
+    else qputenv("NAFTAMON_CONFIG", oldPath);
+}
+
 static bool waitFor(ThrukServer &s, std::function<bool()> cond, int ms) {
     QElapsedTimer t; t.start();
     while (!cond() && t.elapsed() < ms) {
@@ -114,6 +149,174 @@ static bool waitFor(ThrukServer &s, std::function<bool()> cond, int ms) {
         l.exec();
     }
     return cond();
+}
+
+static bool waitUntil(std::function<bool()> condition, int ms) {
+    QElapsedTimer elapsed; elapsed.start();
+    while (!condition() && elapsed.elapsed() < ms) {
+        QEventLoop loop;
+        QTimer::singleShot(25, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    return condition();
+}
+
+static QJsonDocument sinkGet(const QString &base, const QString &path) {
+    QNetworkAccessManager manager;
+    QNetworkRequest request(QUrl(base + path));
+    request.setTransferTimeout(2000);
+    QNetworkReply *reply = manager.get(request);
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QTimer::singleShot(2500, &loop, &QEventLoop::quit);
+    loop.exec();
+    QJsonDocument result = QJsonDocument::fromJson(reply->readAll());
+    reply->deleteLater();
+    return result;
+}
+static QJsonArray receivedWebhooks(const QString &base) { return sinkGet(base, "/received").array(); }
+static QJsonObject sinkStats(const QString &base) { return sinkGet(base, "/stats").object(); }
+
+static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
+    QUrl receivedUrl(sinkUrl);
+    receivedUrl.setPath("");
+    receivedUrl.setQuery(QString());
+    const QString base = receivedUrl.toString();
+    ServerConf conf{"gateway-test", thrukUrl, "admin", "secret", {}};
+    ThrukServer thruk(conf);
+    thruk.refresh();
+    CHECK(waitFor(thruk, [&] { return thruk.hasData || !thruk.error.isEmpty(); }, 5000));
+    CHECK(thruk.error.isEmpty());
+    CHECK(thruk.raw.hosts.size() == 1 && thruk.raw.services.size() == 3);
+    if (!thruk.raw.services.isEmpty()) {
+        thruk.raw.services[0].output = "secret token admin";
+        thruk.raw.services[0].downtime = true;
+    }
+    ThrukServer empty(ServerConf{"empty", thrukUrl, "admin", "secret", {}});
+    empty.hasData = true;
+    ThrukServer broken(ServerConf{"broken", thrukUrl, "admin", "secret", {}});
+    broken.hasData = true;  // a previous successful poll must not be treated as current
+    broken.raw.services = thruk.raw.services;
+    broken.error = "connection failed";
+    ThrukServer pending(ServerConf{"pending", thrukUrl, "admin", "secret", {}});
+
+    WebhookGateway gateway(nullptr, 250);
+    gateway.setServers({&thruk, &empty});
+    int delivered = 0, failed = 0, lastStatus = -1;
+    QObject::connect(&gateway, &WebhookGateway::delivered, &gateway, [&](int status) {
+        ++delivered; lastStatus = status;
+    });
+    QObject::connect(&gateway, &WebhookGateway::deliveryFailed, &gateway, [&](int status) {
+        ++failed; lastStatus = status;
+    });
+    const int before = sinkStats(base).value("total").toInt();
+    CHECK(!gateway.isEnabled());
+    CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > before; }, 350));
+
+    gateway.configure(true, sinkUrl, 1);
+    CHECK(waitUntil([&] { return delivered >= 1; }, 2000));
+    CHECK(lastStatus == 202);
+    QJsonArray records = receivedWebhooks(base);
+    CHECK(sinkStats(base).value("total").toInt() > before && !records.isEmpty());
+    QJsonObject payload = records.last().toObject();
+    CHECK(payload.value("source") == "NaftaMon" && payload.value("complete") == true);
+    CHECK(QDateTime::fromString(payload.value("timestamp").toString(), Qt::ISODateWithMs).isValid());
+    CHECK(payload.value("servers").toArray().size() == 2);
+    CHECK(payload.value("alerts").toArray().size() == 4);
+    bool acknowledged = false, downtime = false;
+    for (const auto &v : payload.value("alerts").toArray()) {
+        QJsonObject a = v.toObject();
+        CHECK(a.value("server") == "gateway-test" && !a.value("state").toString().isEmpty());
+        CHECK(QDateTime::fromString(a.value("last_check").toString(), Qt::ISODate).isValid());
+        acknowledged |= a.value("acknowledged").toBool();
+        downtime |= a.value("downtime").toBool();
+    }
+    CHECK(acknowledged && downtime);  // visual acknowledgement/downtime filters do not apply
+    const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+    CHECK(!body.contains("secret") && !body.contains("admin") && !body.contains("thrukUrl") &&
+          !body.contains("password") && !body.contains("token"));
+
+    CHECK(waitUntil([&] { return delivered >= 2; }, 1700));  // one-second interval
+    gateway.configure(true, sinkUrl, 2);
+    CHECK(waitUntil([&] { return delivered >= 3; }, 1000));  // immediate on reconfigure
+    const int slowIntervalStart = delivered;
+    CHECK(!waitUntil([&] { return delivered > slowIntervalStart; }, 1100));
+    CHECK(waitUntil([&] { return delivered > slowIntervalStart; }, 1400));
+
+    gateway.setServers({&empty});
+    CHECK(waitUntil([&] { return delivered >= slowIntervalStart + 2; }, 1000));
+    payload = receivedWebhooks(base).last().toObject();
+    CHECK(payload.value("complete") == true && payload.value("alerts").toArray().isEmpty());
+    CHECK(payload.value("servers").toArray().first().toObject().value("status") == "ok");
+
+    gateway.setServers({&empty, &broken});
+    CHECK(waitUntil([&] { return delivered >= slowIntervalStart + 3; }, 1000));
+    payload = receivedWebhooks(base).last().toObject();
+    CHECK(payload.value("complete") == false && payload.value("alerts").toArray().isEmpty());
+    CHECK(payload.value("servers").toArray().last().toObject().value("status") == "error");
+
+    const int beforePartial = delivered;
+    gateway.setServers({&thruk, &broken, &pending});
+    CHECK(waitUntil([&] { return delivered > beforePartial; }, 1000));
+    payload = receivedWebhooks(base).last().toObject();
+    CHECK(payload.value("complete") == false && payload.value("alerts").toArray().size() == 4);
+    CHECK(payload.value("servers").toArray().last().toObject().value("status") == "pending");
+
+    ThrukServer second(ServerConf{"gateway-second", thrukUrl, "admin", "secret", {}});
+    second.hasData = true;
+    second.raw = thruk.raw;
+    for (Item &item : second.raw.hosts) item.server = second.conf.name;
+    for (Item &item : second.raw.services) item.server = second.conf.name;
+    const int beforeMulti = delivered;
+    gateway.setServers({&thruk, &second});
+    CHECK(waitUntil([&] { return delivered > beforeMulti; }, 1000));
+    payload = receivedWebhooks(base).last().toObject();
+    CHECK(payload.value("complete") == true && payload.value("servers").toArray().size() == 2);
+    CHECK(payload.value("alerts").toArray().size() == 8);
+    QSet<QString> alertServers;
+    for (const auto &value : payload.value("alerts").toArray())
+        alertServers.insert(value.toObject().value("server").toString());
+    CHECK(alertServers == QSet<QString>({"gateway-test", "gateway-second"}));
+
+    gateway.configure(true, sinkUrl + "?status=500", 1);
+    CHECK(waitUntil([&] { return failed >= 1; }, 1500));
+    CHECK(lastStatus == 500);
+    gateway.configure(true, "http://127.0.0.1:1/webhook", 1);
+    CHECK(waitUntil([&] { return failed >= 2; }, 1500));
+    CHECK(lastStatus == 0);
+    gateway.configure(true, sinkUrl + "?delay=2&status=500", 1);
+    CHECK(waitUntil([&] { return failed >= 3; }, 1500));
+    CHECK(lastStatus == 0);  // absolute 250 ms timeout
+    gateway.configure(false, sinkUrl, 1);
+    const int stoppedAt = sinkStats(base).value("total").toInt();
+    CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > stoppedAt; }, 1300));
+    CHECK(!gateway.isEnabled());
+
+    ThrukServer bulk(ServerConf{"bulk", thrukUrl, "admin", "secret", {}});
+    bulk.hasData = true;
+    for (int n = 0; n < 7000; ++n) {
+        Item item = svc("bulk-host-" + QString::number(n) + QString(100, 'x'), "disk", CRITICAL);
+        item.server = "bulk";
+        bulk.raw.services.append(item);
+    }
+    WebhookGateway large(nullptr, 5000);
+    large.setServers({&bulk});
+    int largeDelivered = 0;
+    QObject::connect(&large, &WebhookGateway::delivered, &large, [&](int) { ++largeDelivered; });
+    large.configure(true, sinkUrl + "?quiet=1", 60);
+    CHECK(waitUntil([&] { return largeDelivered == 1; }, 5000));
+    large.configure(false, sinkUrl, 60);
+    CHECK(sinkStats(base).value("last_body_bytes").toInt() > 1024 * 1024);
+    CHECK(receivedWebhooks(base).last().toObject().value("alerts").toArray().size() == 7000);
+
+    WebhookGateway slow(nullptr, 4000);
+    slow.setServers({&empty});
+    const int slowBefore = sinkStats(base).value("total").toInt();
+    slow.configure(true, sinkUrl + "?delay=2.5&status=500", 1);
+    CHECK(waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore; }, 1000));
+    CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore + 1; }, 1300));
+    slow.configure(false, sinkUrl, 1);
+    CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore + 1; }, 1200));
 }
 
 static const Item *find(const ThrukServer &s, const QString &host, const QString &service) {
@@ -262,7 +465,10 @@ static void thrukTests(const QString &url) {
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     coreTests();
+    configTests();
     QString url = qEnvironmentVariable("MOCK_URL");
+    QString webhookUrl = qEnvironmentVariable("WEBHOOK_URL");
+    if (!url.isEmpty() && !webhookUrl.isEmpty()) webhookTests(url, webhookUrl);
     if (!url.isEmpty()) thrukTests(url);
     std::printf(failures ? "%d FAILURE(S)\n" : "all tests passed\n", failures);
     return failures ? 1 : 0;
