@@ -61,6 +61,7 @@ The desktop also has an xterm. The app configuration is `/lab-state/config/nafta
 
 ```powershell
 docker compose -f compose.dev.yaml exec dev python3 docker/lab-smoke.py
+docker compose -f compose.dev.yaml exec dev python3 docker/lab-audit.py
 docker compose -f compose.dev.yaml logs --tail=50 thruk webhooks
 ```
 
