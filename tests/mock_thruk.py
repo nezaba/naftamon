@@ -5,7 +5,7 @@ and the use_wait_feature behaviour (POST with json=1 blocks until the recheck ha
 usage: mock_thruk.py PORT [--no-wait] [--basic] [--big N]   (user admin / password secret)
 --basic: every request needs a Basic Authorization header; 401 without a challenge otherwise
 """
-import json, re, sys, threading, time, urllib.parse
+import json, os, re, sys, threading, time, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 PORT = int(sys.argv[1])
@@ -172,4 +172,4 @@ class H(BaseHTTPRequestHandler):
             return self.send(302, '', headers=[('Location', '/thruk/')])
         return self.send(404, 'no')
 
-ThreadingHTTPServer(('127.0.0.1', PORT), H).serve_forever()
+ThreadingHTTPServer((os.environ.get('MOCK_THRUK_BIND', '127.0.0.1'), PORT), H).serve_forever()

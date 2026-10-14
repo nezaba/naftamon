@@ -37,6 +37,43 @@ Config: `~/.config/naftamon/naftamon.ini`
 
 Tests (core logic + Thruk client against a mock Thruk): `tests/run.sh`
 
+## Docker Desktop development lab (Windows 11)
+
+This lab needs Docker Desktop with its WSL2 backend and Linux containers. It does not need a separate Ubuntu installation in WSL2 or access to a live Thruk server. The development image uses Ubuntu 24.04, Qt6 and qmake6. Source files are bind mounted from this repository; `build/` and the test configuration live in Docker volumes, so rebuilds reuse existing objects. The only configured server is the bundled Thruk mock (`admin` / `secret`, test credentials only). The webhook receiver is a JSON logging sink for future integration work; NaftaMon does not send webhooks yet.
+
+Run these commands in PowerShell from the repository root:
+
+```powershell
+docker compose -f compose.dev.yaml up --build -d
+docker compose -f compose.dev.yaml ps
+docker compose -f compose.dev.yaml exec dev bash -lc 'mkdir -p build && cd build && qmake6 ../naftamon.pro && make -j"$(nproc)"'
+docker compose -f compose.dev.yaml run --rm -T dev bash tests/run.sh
+```
+
+The test command is headless and runs the existing mock in normal, `--no-wait`, and `--basic` modes. For a manual Qt6 check, start the compiled application and open [noVNC](http://localhost:6080/vnc.html?autoconnect=1) in a Windows browser:
+
+```powershell
+docker compose -f compose.dev.yaml exec -d dev bash -lc './build/naftamon > /lab-state/naftamon.log 2>&1'
+docker compose -f compose.dev.yaml exec dev cat /lab-state/naftamon.log
+```
+
+The desktop also has an xterm. The app configuration is `/lab-state/config/naftamon.ini` inside the `dev` container. It is created on first start with only the mock endpoint. The repository and Windows home directory are never used as the app's configuration directory. The app can update that config; the Docker `state` volume keeps it across restarts. To check the mock API or send a sample JSON payload to the sink:
+
+```powershell
+Invoke-RestMethod http://localhost:18765/thruk/_stats
+Invoke-RestMethod -Method Post -Uri http://localhost:18766/webhook -ContentType 'application/json' -Body '{"event":"lab-check"}'
+docker compose -f compose.dev.yaml logs --tail=50 thruk webhooks
+```
+
+The services publish ports only on Windows localhost: noVNC `6080`, mock Thruk `18765`, and webhook sink `18766`. To inspect and stop the lab:
+
+```powershell
+docker compose -f compose.dev.yaml logs -f dev thruk webhooks
+docker compose -f compose.dev.yaml down
+```
+
+`down` preserves the build and state volumes. `docker compose -f compose.dev.yaml down -v` deletes those lab volumes and resets the test configuration and compiled objects.
+
 ## Why it is faster than Nagstamon
 
 Measured cause of the slow "recheck" in Nagstamon (source read at commit ed379f9):
