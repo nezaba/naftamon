@@ -57,15 +57,14 @@ docker compose -f compose.dev.yaml exec -d dev bash -lc './build/naftamon > /lab
 docker compose -f compose.dev.yaml exec dev cat /lab-state/naftamon.log
 ```
 
-The desktop also has an xterm. The app configuration is `/lab-state/config/naftamon.ini` inside the `dev` container. It is created on first start with only the mock endpoint. The repository and Windows home directory are never used as the app's configuration directory. The app can update that config; the Docker `state` volume keeps it across restarts. To check the mock API or send a sample JSON payload to the sink:
+The desktop also has an xterm. The app configuration is `/lab-state/config/naftamon.ini` inside the `dev` container. It is created on first start with only the mock endpoint. The repository and Windows home directory are never used as the app's configuration directory. The app can update that config; the Docker `state` volume keeps it across restarts. To check the mock API and send a sample JSON payload to the sink over the private Compose network:
 
 ```powershell
-Invoke-RestMethod http://localhost:18765/thruk/_stats
-Invoke-RestMethod -Method Post -Uri http://localhost:18766/webhook -ContentType 'application/json' -Body '{"event":"lab-check"}'
+docker compose -f compose.dev.yaml exec dev python3 docker/lab-smoke.py
 docker compose -f compose.dev.yaml logs --tail=50 thruk webhooks
 ```
 
-The services publish ports only on Windows localhost: noVNC `6080`, mock Thruk `18765`, and webhook sink `18766`. To inspect and stop the lab:
+Only noVNC publishes a Windows localhost port (`6080`). The mock and webhook receiver are reachable inside Compose as `thruk:18765` and `webhooks:8080`, so Windows reserved ports cannot block them. To inspect and stop the lab:
 
 ```powershell
 docker compose -f compose.dev.yaml logs -f dev thruk webhooks

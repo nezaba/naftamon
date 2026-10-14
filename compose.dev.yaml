@@ -35,8 +35,6 @@ services:
     command: ["python3", "-u", "/app/mock_thruk.py", "18765"]
     volumes:
       - ./tests/mock_thruk.py:/app/mock_thruk.py:ro
-    ports:
-      - "127.0.0.1:18765:18765"
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18765/thruk/_stats', timeout=2)"]
       interval: 5s
@@ -48,8 +46,6 @@ services:
     command: ["python3", "-u", "/app/webhook_receiver.py"]
     volumes:
       - ./docker/webhook_receiver.py:/app/webhook_receiver.py:ro
-    ports:
-      - "127.0.0.1:18766:8080"
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
       interval: 5s
