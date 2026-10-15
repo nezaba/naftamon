@@ -172,6 +172,9 @@ Test Webhook envía un mensaje separado, sin complete, servers ni alerts. No deb
 - Para error o pending, conservar alertas previas como stale/no confirmadas; no inferir recuperación.
 - complete == false no invalida servidores individuales ok: se pueden reconciliar por servidor. Indica que al menos una parte está incompleta.
 - `alerts` sigue siendo el único conjunto de alertas. `ok_statuses` describe hosts y servicios UP/OK y no debe activar reglas o notificaciones de alerta.
+- El backend guarda `status_information` en alertas y estados UP. Si un elemento entrante incluye una cadena vacía, actualiza el valor almacenado a vacío; si un elemento de una versión antigua omite la propiedad, conserva el valor previo. Cambiar solo `status_information` no crea una transición de alerta.
+- `GET /api/v1/alerts` incluye `status_information` en cada alerta. `GET /api/v1/statuses` combina alertas activas con los objetos UP más recientes e incluye la misma información y un indicador `stale`. La interfaz visual actual todavía no muestra el campo ni consume los objetos UP.
+- Una snapshot con timestamp anterior al último aceptado de esa fuente recibe una respuesta de aceptación sin modificar el snapshot ni los estados persistidos. Su hora de recepción se conserva para reflejar que hubo tráfico.
 - complete true, servidores ok y alerts vacío es distinto de una fuente silenciosa o de un servidor inaccesible.
 - Una recuperación solo se observa cuando una alerta deja de aparecer en un snapshot ok. No se incluye evento ni timestamp explícito de recuperación.
 

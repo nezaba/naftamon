@@ -107,6 +107,7 @@ def _alert_dict(row, stale: bool) -> dict[str, Any]:
         "downtime": _bool(row["downtime"]),
         "last_check": row["last_check"],
         "last_change": row["last_change"],
+        "status_information": row["status_information"],
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
         "stale": stale,
@@ -250,6 +251,67 @@ def create_app(
         return {"total": total, "limit": limit, "offset": offset,
                 "items": [_alert_dict(row, _bool(row["stale_flag"])) for row in rows]}
 
+    @app.get("/api/v1/statuses")
+    def list_statuses(
+        source_id: int | None = None,
+        server: str | None = Query(default=None, max_length=255),
+        backend: str | None = Query(default=None, max_length=255),
+        host: str | None = Query(default=None, max_length=255),
+        service: str | None = Query(default=None, max_length=255),
+        state: str | None = Query(default=None, max_length=32),
+        status_type: str | None = Query(default=None, alias="type", pattern="^(host|service)$"),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ):
+        """Return all current monitoring states, including healthy UP/OK objects."""
+        union_query = f"""SELECT * FROM (
+            SELECT 'alert:' || a.id AS id, a.source_id, s.source_name AS source, s.peer_ip,
+                   a.server, a.backend, a.host, a.service, a.type, a.state,
+                   a.status_information, a.hard, a.acknowledged, a.downtime,
+                   a.last_check, a.last_change, a.first_seen_at, a.last_seen_at,
+                   {_stale_clause()} AS stale_flag
+              FROM active_alerts a JOIN sources s ON s.id = a.source_id
+              JOIN monitored_servers ms ON ms.source_id = a.source_id AND ms.name = a.server
+            UNION ALL
+            SELECT 'status:' || m.id AS id, m.source_id, s.source_name AS source, s.peer_ip,
+                   m.server, m.backend, m.host, m.service, m.type, m.state,
+                   m.status_information, m.hard, m.acknowledged, m.downtime,
+                   m.last_check, m.last_change, m.first_seen_at, m.last_seen_at,
+                   CASE WHEN ((julianday('now') - julianday(s.last_received_at)) * 86400 > ?
+                     OR ms.status != 'ok' OR ms.status_revision < s.snapshot_revision OR ms.removed = 1
+                     OR julianday(m.snapshot_timestamp) < julianday(s.payload_timestamp)) THEN 1 ELSE 0 END AS stale_flag
+              FROM monitored_statuses m JOIN sources s ON s.id = m.source_id
+              JOIN monitored_servers ms ON ms.source_id = m.source_id AND ms.name = m.server
+        )"""
+        conditions = []
+        params: list[Any] = [app_settings.offline_after_seconds, app_settings.offline_after_seconds]
+        for column, value in (("source_id", source_id), ("server", server), ("backend", backend),
+                              ("host", host), ("service", service), ("type", status_type)):
+            if value is not None:
+                conditions.append(f"{column} = ?")
+                params.append(value)
+        if state is not None:
+            conditions.append("state = ?")
+            params.append(state.upper())
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        with connect(app_settings.database_path) as db:
+            total = db.execute("SELECT COUNT(*) FROM (" + union_query + ") AS current_statuses" + where, params).fetchone()[0]
+            rows = db.execute(
+                "SELECT * FROM (" + union_query + ") AS current_statuses" + where +
+                " ORDER BY state, server, host, service LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["hard"] = _bool(item["hard"])
+            item["acknowledged"] = _bool(item["acknowledged"])
+            item["downtime"] = _bool(item["downtime"])
+            item["stale"] = _bool(item["stale_flag"])
+            del item["stale_flag"]
+            items.append(item)
+        return {"total": total, "limit": limit, "offset": offset, "items": items}
+
     @app.get("/api/v1/stats")
     def stats():
         with connect(app_settings.database_path) as db:
@@ -312,7 +374,7 @@ def create_app(
                 }
                 required_tables = {
                     "schema_version", "sources", "latest_snapshots", "monitored_servers",
-                    "active_alerts", "alert_history",
+                    "active_alerts", "monitored_statuses", "alert_history",
                 }
                 if version != SCHEMA_VERSION or not required_tables.issubset(tables):
                     return JSONResponse({"status": "unhealthy", "database": "unavailable"}, status_code=503)

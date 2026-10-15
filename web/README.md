@@ -18,7 +18,7 @@ La página principal en `http://127.0.0.1:8080/` abre directamente el dashboard,
 
 La vista principal muestra el total de alertas, CRITICAL, WARNING, UNKNOWN y hosts DOWN/UNREACHABLE; cuenta fuentes online/offline por su última recepción y muestra separadamente errores o estados pendientes de servidores Thruk. Una consulta vacía solo se presenta como saludable cuando las fuentes están online y los snapshots son completos y exitosos. Si falta información, la interfaz advierte que la ausencia de alertas no confirma salud.
 
-La tabla presenta únicamente campos que envía el Gateway o que el receptor observa: fuente provisional (nombre e IP peer), servidor, backend, host, servicio, estado, confirmación del dato, acknowledgement, downtime y última recepción. El contrato no envía plugin output ni descripción; por eso no se muestran. Los filtros combinables cubren host, servicio, texto, severidad, servidor, backend, fuente, acknowledgement y downtime. Los encabezados permiten ordenar y la tabla pagina localmente los resultados.
+La tabla presenta fuente provisional (nombre e IP peer), servidor, backend, host, servicio, estado, confirmación del dato, acknowledgement, downtime y última recepción. Desktop ahora envía `status_information`; el backend lo conserva y lo devuelve en las APIs, aunque esta versión de la tabla todavía no lo muestra. Los filtros combinables cubren host, servicio, texto, severidad, servidor, backend, fuente, acknowledgement y downtime. Los encabezados permiten ordenar y la tabla pagina localmente los resultados.
 
 El dashboard consulta APIs del mismo origen mediante polling HTTP. El intervalo inicial es 5 segundos y se puede cambiar a 10, 15, 30 o 60 segundos desde la barra superior; esa preferencia se conserva en el navegador. El dashboard recorre las páginas de alertas del backend en lotes de hasta 500, sin truncar la lista por el límite de una página. Los filtros, el orden y la página actual se mantienen durante cada actualización. El selector de tema claro/oscuro también se guarda localmente.
 
@@ -134,7 +134,8 @@ Todas las rutas son mismo origen, no requieren autenticación y devuelven JSON:
 | Método y ruta | Uso |
 | --- | --- |
 | `GET /` | Dashboard visual, sin autenticación. |
-| `GET /api/v1/alerts` | Alertas activas con `source_id`, `server`, `state`, `type`, `stale`, `limit` y `offset` opcionales. |
+| `GET /api/v1/alerts` | Alertas activas con `status_information` y filtros opcionales `source_id`, `server`, `state`, `type`, `stale`, `limit` y `offset`. |
+| `GET /api/v1/statuses` | Todos los estados actuales: alertas activas más objetos UP recibidos en `ok_statuses[]`; incluye `status_information`, `stale` y filtros por fuente/servidor/backend/host/servicio/estado/tipo. |
 | `GET /api/v1/stats` | Total de alertas, agrupación por estado y fuentes online/offline. |
 | `GET /api/v1/sources` | Última recepción, frescura y estado de consultas por servidor. |
 | `GET /api/v1/history` | Transiciones observadas; filtros `source_id`, `server`, `limit`, `offset`. |
@@ -146,7 +147,7 @@ La recuperación se fecha cuando el servidor web observa que la alerta ya no est
 
 El motor de notificaciones está apagado inicialmente. Los canales y reglas nuevos también comienzan deshabilitados. El contenedor `notifications` procesa la cola SQLite en segundo plano; si un proveedor falla, el receptor sigue almacenando snapshots. La sección **Notifications** permite configurar Rules, Channels, History y Settings desde el dashboard. La prueba de una regla solo muestra coincidencias; el botón de prueba de un canal sí intenta enviar un mensaje al destino configurado.
 
-Los eventos admitidos son apertura, cambio de estado, recuperación observada y recordatorio opcional. Un snapshot idéntico no vuelve a notificar. Una recuperación exige una respuesta `ok` del servidor Thruk correspondiente; errores y silencios no se tratan como recuperación. Las condiciones solo pueden usar los campos realmente presentes en el contrato. No hay plugin output ni un ID estable de instalación, por lo que no se pueden filtrar por esos datos. Las plantillas tampoco admiten `{output}`. Consulta el [diseño y límites del motor](docs/notification-design.md).
+Los eventos admitidos son apertura, cambio de estado, recuperación observada y recordatorio opcional. Un snapshot idéntico no vuelve a notificar. Una recuperación exige una respuesta `ok` del servidor Thruk correspondiente; errores y silencios no se tratan como recuperación. Los objetos UP recibidos en `ok_statuses[]` se guardan fuera del flujo de alertas y no crean notificaciones. Los filtros y plantillas actuales no usan `status_information`; agregarlo a esas reglas queda fuera de esta versión. No hay un ID estable de instalación. Consulta el [diseño y límites del motor](docs/notification-design.md).
 
 Los destinos soportados son Telegram, Gotify, ntfy y webhook HTTP. Telegram requiere bot token y chat ID; Gotify requiere URL de servidor y application token; ntfy requiere URL y topic, con credenciales opcionales; webhook HTTP requiere URL y admite headers y cuerpo JSON controlados. Las credenciales se cifran con una clave local externa a SQLite. Para crearla desde `web/`, primero construye la imagen y crea el directorio local:
 

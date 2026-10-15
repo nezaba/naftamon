@@ -21,6 +21,18 @@ def alert(state="CRITICAL", host="db01", service="disk", **changes):
     return value
 
 
+def ok_status(host="web01", service="", **changes):
+    value = {
+        "server": "Thruk oficina", "backend": "alpha", "host": host, "service": service,
+        "type": "service" if service else "host", "state": "UP", "hard": True,
+        "acknowledged": False, "downtime": False,
+        "last_check": "2026-10-14T21:59:00Z", "last_change": "2026-10-14T21:30:00Z",
+        "status_information": "OK",
+    }
+    value.update(changes)
+    return value
+
+
 def snapshot(alerts=None, *, timestamp="2026-10-14T22:00:00.000Z", complete=True, servers=None, source="NaftaMon"):
     if servers is None:
         servers = [{"server": "Thruk oficina", "status": "ok"}]
@@ -41,10 +53,129 @@ def test_valid_webhook_and_unauthenticated_read_apis(client):
     assert response.json()["accepted"] is True
     assert response.json()["kind"] == "snapshot"
     assert client.get("/api/v1/alerts").json()["items"][0]["state"] == "CRITICAL"
+    assert client.get("/api/v1/alerts").json()["items"][0]["status_information"] == ""
     assert client.get("/api/v1/sources").status_code == 200
     assert client.get("/api/v1/stats").json()["alerts"]["total"] == 1
     assert client.get("/api/v1/history").json()["items"][0]["event"] == "opened"
     assert client.get("/healthz").json() == {"status": "ok", "database": "ok"}
+
+
+def test_alert_status_information_unicode_and_legacy_omission(client):
+    original = "DISK CRITICAL — 94%\nmontado en /datos\tñ 🛰️"
+    first = snapshot([alert(status_information=original)])
+    assert client.post("/api/v1/ingest", json=first).status_code == 202
+    assert client.get("/api/v1/alerts").json()["items"][0]["status_information"] == original
+
+    legacy_alert = alert("WARNING")
+    legacy_alert.pop("status_information", None)
+    legacy = snapshot([legacy_alert], timestamp="2026-10-14T22:01:00.000Z")
+    assert client.post("/api/v1/ingest", json=legacy).status_code == 202
+    current = client.get("/api/v1/alerts").json()["items"][0]
+    assert current["state"] == "WARNING"
+    assert current["status_information"] == original
+
+    explicit_empty = snapshot(
+        [alert("WARNING", status_information="")], timestamp="2026-10-14T22:02:00.000Z"
+    )
+    assert client.post("/api/v1/ingest", json=explicit_empty).status_code == 202
+    assert client.get("/api/v1/alerts").json()["items"][0]["status_information"] == ""
+
+
+def test_ok_statuses_and_alerts_are_available_as_monitoring_statuses_without_new_events(app_factory):
+    app = app_factory()
+    body = snapshot(
+        [
+            alert("WARNING", host="web01", service="http", server="Thruk oficina"),
+            alert("CRITICAL", host="db01", service="disk", server="Thruk oficina"),
+            alert("UNKNOWN", host="batch01", service="worker", server="Thruk dc"),
+        ],
+        servers=[{"server": "Thruk oficina", "status": "ok"}, {"server": "Thruk dc", "status": "ok"}],
+    )
+    body["ok_statuses"] = [
+        ok_status(host="web01", service="", status_information="Linux host UP", server="Thruk oficina"),
+        ok_status(host="web01", service="ssh", status_information="SSH OK", server="Thruk oficina"),
+        ok_status(host="db02", service="", status_information="PostgreSQL host UP", server="Thruk dc", backend="beta"),
+    ]
+    with TestClient(app) as client:
+        assert client.post("/api/v1/ingest", json=body).status_code == 202
+        with sqlite3.connect(app.state.settings.database_path) as db:
+            notification_count = db.execute("SELECT COUNT(*) FROM notification_events").fetchone()[0]
+        updated = json.loads(json.dumps(body))
+        updated["timestamp"] = "2026-10-14T22:01:00Z"
+        updated["alerts"][0]["status_information"] = "WARNING details changed"
+        updated["ok_statuses"][0]["status_information"] = "Linux host still UP"
+        assert client.post("/api/v1/ingest", json=updated).status_code == 202
+        result = client.get("/api/v1/statuses").json()
+        assert result["total"] == 6
+        items = {(item["server"], item["backend"], item["host"], item["service"]): item for item in result["items"]}
+        assert items[("Thruk oficina", "alpha", "web01", "")]["state"] == "UP"
+        assert items[("Thruk oficina", "alpha", "web01", "")]["status_information"] == "Linux host still UP"
+        assert items[("Thruk oficina", "alpha", "web01", "ssh")]["status_information"] == "SSH OK"
+        assert items[("Thruk oficina", "alpha", "web01", "http")]["state"] == "WARNING"
+        assert items[("Thruk oficina", "alpha", "db01", "disk")]["state"] == "CRITICAL"
+        assert items[("Thruk dc", "alpha", "batch01", "worker")]["state"] == "UNKNOWN"
+        assert client.get("/api/v1/statuses", params={"state": "up", "server": "Thruk dc"}).json()["total"] == 1
+        assert client.get("/api/v1/alerts").json()["total"] == 3
+        assert next(item for item in client.get("/api/v1/alerts").json()["items"]
+                    if item["host"] == "web01")["status_information"] == "WARNING details changed"
+        assert client.get("/api/v1/history").json()["total"] == 3
+        with sqlite3.connect(app.state.settings.database_path) as db:
+            assert db.execute("SELECT COUNT(*) FROM notification_events").fetchone()[0] == notification_count
+
+
+def test_successive_ok_status_updates_are_deduplicated_and_missing_information_is_preserved(client):
+    first = snapshot([], timestamp="2026-10-14T22:00:00Z")
+    first["ok_statuses"] = [ok_status(status_information="first value")]
+    assert client.post("/api/v1/ingest", json=first).status_code == 202
+
+    legacy = snapshot([], timestamp="2026-10-14T22:00:30Z")
+    assert client.post("/api/v1/ingest", json=legacy).status_code == 202
+    preserved = client.get("/api/v1/statuses").json()["items"]
+    assert len(preserved) == 1
+    assert preserved[0]["status_information"] == "first value"
+    assert preserved[0]["stale"] is True
+
+    old_sender = ok_status(status_information="will be omitted")
+    old_sender.pop("status_information")
+    newer = snapshot([], timestamp="2026-10-14T22:01:00Z")
+    newer["ok_statuses"] = [old_sender]
+    assert client.post("/api/v1/ingest", json=newer).status_code == 202
+    result = client.get("/api/v1/statuses").json()
+    assert result["total"] == 1
+    assert result["items"][0]["status_information"] == "first value"
+
+    updated = snapshot([], timestamp="2026-10-14T22:02:00Z")
+    updated["ok_statuses"] = [ok_status(status_information="updated ñ")]
+    assert client.post("/api/v1/ingest", json=updated).status_code == 202
+    current = client.get("/api/v1/statuses").json()
+    assert current["total"] == 1
+    assert current["items"][0]["status_information"] == "updated ñ"
+
+    resolved = snapshot([], timestamp="2026-10-14T22:03:00Z")
+    resolved["ok_statuses"] = []
+    assert client.post("/api/v1/ingest", json=resolved).status_code == 202
+    assert client.get("/api/v1/statuses").json()["total"] == 0
+
+
+def test_older_snapshot_cannot_overwrite_newer_alert_or_ok_status(client):
+    current = snapshot([alert("CRITICAL", status_information="new alert detail")], timestamp="2026-10-14T22:01:00Z")
+    current["ok_statuses"] = [ok_status(status_information="new status detail")]
+    assert client.post("/api/v1/ingest", json=current).status_code == 202
+
+    older = snapshot([alert("WARNING", status_information="old alert detail")], timestamp="2026-10-14T22:00:00Z")
+    older["ok_statuses"] = [ok_status(status_information="old status detail")]
+    response = client.post("/api/v1/ingest", json=older)
+    assert response.status_code == 202
+    assert response.json()["stale_snapshot"] is True
+    alerts = client.get("/api/v1/alerts").json()["items"]
+    statuses = client.get("/api/v1/statuses").json()["items"]
+    assert alerts[0]["state"] == "CRITICAL"
+    assert alerts[0]["status_information"] == "new alert detail"
+    healthy = next(item for item in statuses if item["state"] == "UP")
+    assert healthy["status_information"] == "new status detail"
+    assert [item["event"] for item in client.get("/api/v1/history").json()["items"]] == ["opened"]
+    source = client.get("/api/v1/sources").json()["items"][0]
+    assert source["payload_timestamp"] == current["timestamp"]
 
 
 def test_invalid_json_content_type_and_shape(client):
@@ -54,6 +185,9 @@ def test_invalid_json_content_type_and_shape(client):
     bad_timestamp = snapshot([alert()])
     bad_timestamp["timestamp"] = "yesterday"
     assert client.post("/api/v1/ingest", json=bad_timestamp).status_code == 422
+    null_statuses = snapshot([])
+    null_statuses["ok_statuses"] = None
+    assert client.post("/api/v1/ingest", json=null_statuses).status_code == 422
 
 
 def test_request_body_size_limit(app_factory):

@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from .db import connect
-from .models import Alert, Snapshot
+from .models import Alert, OkStatus, Snapshot
 from .notifications.events import record_transition
 
 
@@ -35,6 +35,12 @@ def alert_state(alert: Alert) -> str:
     )
 
 
+def _payload_is_older(incoming: str, latest: str) -> bool:
+    incoming_at = datetime.fromisoformat(incoming.replace("Z", "+00:00"))
+    latest_at = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+    return incoming_at < latest_at
+
+
 def reconcile_server(
     db: sqlite3.Connection,
     source_id: int,
@@ -59,12 +65,13 @@ def reconcile_server(
                 """INSERT INTO active_alerts
                    (source_id, server, backend, host, service, type, state, hard,
                     acknowledged, downtime, last_check, last_change, first_seen_at, last_seen_at,
-                    episode_id, notification_revision)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    episode_id, notification_revision, status_information)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source_id, alert.server, alert.backend, alert.host, alert.service, alert.type,
                     alert.state, int(alert.hard), int(alert.acknowledged), int(alert.downtime),
                     alert.last_check, alert.last_change, received_at, received_at, episode_id, revision,
+                    alert.status_information or "",
                 ),
             )
             db.execute(
@@ -113,10 +120,13 @@ def reconcile_server(
             )
         db.execute(
             """UPDATE active_alerts SET state = ?, hard = ?, acknowledged = ?, downtime = ?,
-               last_check = ?, last_change = ?, last_seen_at = ?, notification_revision = ? WHERE id = ?""",
+               last_check = ?, last_change = ?, last_seen_at = ?, notification_revision = ?,
+               status_information = COALESCE(?, status_information) WHERE id = ?""",
             (
                 alert.state, int(alert.hard), int(alert.acknowledged), int(alert.downtime),
-                alert.last_check, alert.last_change, received_at, revision, previous["id"],
+                alert.last_check, alert.last_change, received_at, revision,
+                alert.status_information if "status_information" in alert.model_fields_set else None,
+                previous["id"],
             ),
         )
 
@@ -152,13 +162,67 @@ def reconcile_server(
             db.execute("DELETE FROM active_alerts WHERE id = ?", (previous["id"],))
 
 
+def reconcile_ok_statuses(
+    db: sqlite3.Connection,
+    source_id: int,
+    server: str,
+    incoming: list[OkStatus],
+    received_at: str,
+    snapshot_timestamp: str,
+) -> None:
+    existing_rows = db.execute(
+        "SELECT * FROM monitored_statuses WHERE source_id = ? AND server = ?",
+        (source_id, server),
+    ).fetchall()
+    existing = {(r["server"], r["backend"], r["host"], r["service"], r["type"]): r for r in existing_rows}
+    current = {
+        (status.server, status.backend, status.host, status.service, status.type): status
+        for status in incoming
+    }
+
+    for key, status in current.items():
+        previous = existing.get(key)
+        if previous is None:
+            db.execute(
+                """INSERT INTO monitored_statuses
+                   (source_id, server, backend, host, service, type, state, status_information,
+                    hard, acknowledged, downtime, last_check, last_change, first_seen_at,
+                    last_seen_at, snapshot_timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    source_id, status.server, status.backend, status.host, status.service,
+                    status.type, status.state, status.status_information or "", int(status.hard),
+                    int(status.acknowledged), int(status.downtime), status.last_check,
+                    status.last_change, received_at, received_at, snapshot_timestamp,
+                ),
+            )
+            continue
+
+        db.execute(
+            """UPDATE monitored_statuses SET state = ?, status_information = COALESCE(?, status_information),
+               hard = ?, acknowledged = ?, downtime = ?, last_check = ?, last_change = ?,
+               last_seen_at = ?, snapshot_timestamp = ? WHERE id = ?""",
+            (
+                status.state,
+                status.status_information if "status_information" in status.model_fields_set else None,
+                int(status.hard), int(status.acknowledged),
+                int(status.downtime), status.last_check, status.last_change, received_at,
+                snapshot_timestamp, previous["id"],
+            ),
+        )
+
+    for key, previous in existing.items():
+        if key not in current:
+            db.execute("DELETE FROM monitored_statuses WHERE id = ?", (previous["id"],))
+
+
 def accept_snapshot(
     database_path,
     snapshot: Snapshot,
     peer_ip: str,
     retention_days: int,
 ) -> dict[str, Any]:
-    source_data = snapshot.model_dump(mode="json")
+    source_data = snapshot.model_dump(mode="json", exclude_unset=True)
     hash_data = dict(source_data)
     hash_data.pop("timestamp", None)
     canonical = json.dumps(hash_data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -172,7 +236,7 @@ def accept_snapshot(
         db.execute("BEGIN IMMEDIATE")
         received_at = iso_utc()
         row = db.execute(
-            "SELECT id, snapshot_revision FROM sources WHERE source_name = ? AND peer_ip = ?",
+            "SELECT id, snapshot_revision, payload_timestamp FROM sources WHERE source_name = ? AND peer_ip = ?",
             (snapshot.source, peer_ip),
         ).fetchone()
         if row is None:
@@ -186,6 +250,15 @@ def accept_snapshot(
             source_revision = 1
         else:
             source_id = row["id"]
+            if _payload_is_older(snapshot.timestamp, row["payload_timestamp"]):
+                # A delayed webhook must not roll back the latest snapshot or any
+                # per-server state. Receipt time still reflects observed traffic.
+                db.execute("UPDATE sources SET last_received_at = ? WHERE id = ?", (received_at, source_id))
+                return {
+                    "kind": "snapshot", "source_id": source_id, "source": snapshot.source,
+                    "received_at": received_at, "complete": snapshot.complete,
+                    "content_hash": content_hash, "stale_snapshot": True,
+                }
             source_revision = row["snapshot_revision"] + 1
             db.execute(
                 """UPDATE sources SET last_received_at = ?, payload_timestamp = ?, complete = ?,
@@ -207,6 +280,9 @@ def accept_snapshot(
         alerts_by_server: dict[str, list[Alert]] = {}
         for alert in snapshot.alerts:
             alerts_by_server.setdefault(alert.server, []).append(alert)
+        statuses_by_server: dict[str, list[OkStatus]] = {}
+        for status in snapshot.ok_statuses or []:
+            statuses_by_server.setdefault(status.server, []).append(status)
 
         for server in snapshot.servers:
             seen_servers.add(server.server)
@@ -230,6 +306,11 @@ def accept_snapshot(
                 )
             if server.status == "ok":
                 reconcile_server(db, source_id, server.server, alerts_by_server.get(server.server, []), received_at)
+                if "ok_statuses" in snapshot.model_fields_set:
+                    reconcile_ok_statuses(
+                        db, source_id, server.server, statuses_by_server.get(server.server, []),
+                        received_at, snapshot.timestamp,
+                    )
 
         if snapshot.complete:
             known = db.execute("SELECT id, name FROM monitored_servers WHERE source_id = ? AND removed = 0", (source_id,)).fetchall()
@@ -251,4 +332,5 @@ def accept_snapshot(
         "received_at": received_at,
         "complete": snapshot.complete,
         "content_hash": content_hash,
+        "stale_snapshot": False,
     }
