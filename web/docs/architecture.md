@@ -2,7 +2,7 @@
 
 ## Estado
 
-La etapa 1 definió esta arquitectura. La etapa 2 implementó receptor, API, persistencia SQLite y Compose. La etapa 3 sirve un dashboard local desde FastAPI; la etapa 4 valida recepción, despliegue y persistencia. NaftaMon Desktop no se modificó. El contrato real del receptor está en [webhook-contract.md](webhook-contract.md).
+La etapa 1 definió esta arquitectura. La etapa 2 implementó receptor, API, persistencia SQLite y Compose. La etapa 3 sirve un dashboard local desde FastAPI; la etapa 4 valida recepción, despliegue y persistencia. La etapa 5 incorpora reglas y notificaciones según [notification-design.md](notification-design.md). NaftaMon Desktop no se modificó. El contrato real del receptor está en [webhook-contract.md](webhook-contract.md).
 
 ## Arquitectura
 

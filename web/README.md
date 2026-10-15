@@ -10,7 +10,7 @@ Dashboard local para ver alertas activas recibidas desde NaftaMon Desktop. Inclu
 
 ## Arquitectura
 
-FastAPI valida los snapshots del Gateway, los reconcilia en SQLite y sirve el dashboard local desde el mismo contenedor. Uvicorn escucha en `0.0.0.0:8000` dentro del contenedor; Compose publica el puerto del host en `127.0.0.1:8080` por defecto. La base vive en el volumen `naftamon_web_data`. No hay servicios de datos externos, login ni recursos remotos.
+FastAPI valida los snapshots del Gateway, los reconcilia en SQLite y sirve el dashboard local desde el contenedor `web`. Un contenedor `notifications` usa la misma base para enviar trabajos de la cola; no publica puertos. Uvicorn escucha en `0.0.0.0:8000` dentro del contenedor; Compose publica el puerto del host en `127.0.0.1:8080` por defecto. La base vive en el volumen `naftamon_web_data`. No hay login ni recursos remotos obligatorios para el dashboard o la ingesta. Los destinos de notificación son opcionales y pueden requerir conexión de red.
 
 La página principal en `http://127.0.0.1:8080/` abre directamente el dashboard, sin login. No usa cuentas, sesiones, API keys, tokens, CDN ni recursos remotos. El dashboard y las APIs son accesibles sin autenticación desde cualquier cliente que alcance el puerto. No lo expongas a Internet.
 
@@ -96,8 +96,10 @@ Estas reglas aplican al backend iptables de Docker; no son persistentes en todas
 | `OFFLINE_AFTER_SECONDS` | `900` | Segundos desde la última recepción antes de marcar una fuente offline. Configúralo por encima del intervalo del Gateway; ese intervalo no viaja en el JSON. |
 | `MAX_REQUEST_BYTES` | `8388608` | Tamaño máximo del POST (8 MiB). |
 | `HISTORY_RETENTION_DAYS` | `90` | Retención del historial de cambios. `0` desactiva la limpieza automática. |
+| `NOTIFICATION_ALLOWED_DESTINATION_CIDRS` | vacío | Rangos privados permitidos para destinos Gotify, ntfy o webhook; usa un CIDR LAN concreto, por ejemplo `192.168.1.0/24`. |
+| `NOTIFICATION_KEY_DIR` | `./.local` | Carpeta del host con `notification.key`; puede apuntar a otra carpeta local para pruebas aisladas. |
 
-Compose carga estos valores desde `.env` o variables de entorno. `.env` no contiene credenciales.
+Compose carga estos valores desde `.env` o variables de entorno. `.env` no contiene credenciales. La clave de cifrado de tokens de notificación se monta desde `web/.local/notification.key` en modo lectura y se mantiene fuera del volumen SQLite, del contexto de construcción y de Git.
 
 ## Endpoint de ingesta
 
@@ -128,6 +130,36 @@ Todas las rutas son mismo origen, no requieren autenticación y devuelven JSON:
 
 La recuperación se fecha cuando el servidor web observa que la alerta ya no está en un snapshot autoritativo `ok`; el Gateway no transmite el instante exacto de recuperación. Cambios transitorios entre snapshots no se pueden reconstruir.
 
+## Notificaciones opcionales
+
+El motor de notificaciones está apagado inicialmente. Los canales y reglas nuevos también comienzan deshabilitados. El contenedor `notifications` procesa la cola SQLite en segundo plano; si un proveedor falla, el receptor sigue almacenando snapshots. La sección **Notifications** permite configurar Rules, Channels, History y Settings desde el dashboard. La prueba de una regla solo muestra coincidencias; el botón de prueba de un canal sí intenta enviar un mensaje al destino configurado.
+
+Los eventos admitidos son apertura, cambio de estado, recuperación observada y recordatorio opcional. Un snapshot idéntico no vuelve a notificar. Una recuperación exige una respuesta `ok` del servidor Thruk correspondiente; errores y silencios no se tratan como recuperación. Las condiciones solo pueden usar los campos realmente presentes en el contrato. No hay plugin output ni un ID estable de instalación, por lo que no se pueden filtrar por esos datos. Las plantillas tampoco admiten `{output}`. Consulta el [diseño y límites del motor](docs/notification-design.md).
+
+Los destinos soportados son Telegram, Gotify, ntfy y webhook HTTP. Telegram requiere bot token y chat ID; Gotify requiere URL de servidor y application token; ntfy requiere URL y topic, con credenciales opcionales; webhook HTTP requiere URL y admite headers y cuerpo JSON controlados. Las credenciales se cifran con una clave local externa a SQLite. Para crearla desde `web/`, primero construye la imagen y crea el directorio local:
+
+```powershell
+docker compose build
+New-Item -ItemType Directory -Force .local | Out-Null
+docker compose run --rm --no-deps web python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" | Set-Content -NoNewline .local/notification.key
+docker compose up -d
+```
+
+En Linux:
+
+```sh
+umask 077
+docker compose build
+mkdir -p .local
+docker compose run --rm --no-deps web python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())' > .local/notification.key
+chmod 600 .local/notification.key
+docker compose up -d
+```
+
+Guarda una copia de esa clave **separada** del backup SQLite, con acceso restringido. Si se pierde, los tokens cifrados existentes no pueden recuperarse; hay que configurarlos otra vez. Si cambias la clave sin recifrar los tokens, los canales con credenciales dejarán de enviar. `.local/` y `.env` no se incluyen en Git ni en la imagen. Para un Gotify o ntfy en LAN, declara solo su subred privada necesaria en `NOTIFICATION_ALLOWED_DESTINATION_CIDRS`, por ejemplo `192.168.1.0/24`, y recrea `web` y `notifications`. No uses un rango amplio como `0.0.0.0/0`.
+
+Puedes inspeccionar el worker con `docker compose logs --tail 100 notifications` y su estado con `docker compose ps`. El historial visual y la API de notificaciones muestran intentos, resultado y errores saneados. Los reintentos son limitados; debido a la ventana entre un POST externo exitoso y su confirmación en SQLite, un proveedor sin idempotencia puede recibir un duplicado tras un corte abrupto.
+
 ## Pruebas y operación
 
 Las pruebas usan fixtures inventados y una SQLite temporal, nunca servicios productivos:
@@ -141,6 +173,19 @@ Invoke-RestMethod http://127.0.0.1:8080/healthz
 Invoke-RestMethod http://127.0.0.1:8080/api/v1/sources
 docker compose restart web
 ```
+
+La suite incluye condiciones de reglas, eventos, reintentos y proveedores con transportes HTTP simulados. Para validar también el recorrido HTTP real `ingest → SQLite → worker → mock` en un proyecto separado, desde PowerShell en `web/`:
+
+```powershell
+Copy-Item .env.notifications-test.example .env.notifications-test
+New-Item -ItemType Directory -Force .test-local | Out-Null
+docker compose --env-file .env.notifications-test -p naftamon-notif-lab --profile mock up -d --build
+docker compose --env-file .env.notifications-test -p naftamon-notif-lab exec -T web python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" | Set-Content -NoNewline .test-local/notification.key
+docker compose --env-file .env.notifications-test -p naftamon-notif-lab --profile mock --profile test run --build --rm test python tests/integration_notification_smoke.py
+docker compose --env-file .env.notifications-test -p naftamon-notif-lab --profile mock down -v
+```
+
+El script usa un puerto loopback separado, un volumen y una clave de prueba. Inspecciona el mock con `docker compose --env-file .env.notifications-test -p naftamon-notif-lab exec -T mock-provider python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/received').read().decode())"`. Usa solo tokens ficticios. El perfil `mock` no publica el receptor de prueba al host. Si el rango Docker local no está dentro de `172.16.0.0/12`, ajusta `NOTIFICATION_ALLOWED_DESTINATION_CIDRS` al CIDR exacto antes de levantar los servicios. No ejecutes `down -v` sobre el proyecto normal que almacena tus datos.
 
 En Linux, los comandos equivalentes son:
 
@@ -167,10 +212,10 @@ docker compose cp web:/tmp/naftamon-backup.sqlite3 "$env:USERPROFILE\naftamon-ba
 Para restaurar, detén el servicio, copia la base al volumen y usa la API SQLite para reemplazar el contenido:
 
 ```powershell
-docker compose stop web
+docker compose stop web notifications
 docker compose cp "$env:USERPROFILE\naftamon-backups\naftamon-web-backup.sqlite3" web:/data/naftamon-restore.sqlite3
 docker compose run --rm --no-deps web python -c "import os,sqlite3; s=sqlite3.connect('/data/naftamon-restore.sqlite3'); d=sqlite3.connect('/data/naftamon.sqlite3'); s.backup(d); d.close(); s.close(); os.remove('/data/naftamon-restore.sqlite3')"
-docker compose start web
+docker compose start web notifications
 Invoke-RestMethod http://127.0.0.1:8080/healthz
 ```
 
@@ -183,10 +228,10 @@ chmod 700 "$HOME/naftamon-backups"
 docker compose exec -T web python -c 'import sqlite3; s=sqlite3.connect("/data/naftamon.sqlite3"); d=sqlite3.connect("/tmp/naftamon-backup.sqlite3"); s.backup(d); d.close(); s.close()'
 docker compose cp web:/tmp/naftamon-backup.sqlite3 "$HOME/naftamon-backups/naftamon-web-backup.sqlite3"
 chmod 600 "$HOME/naftamon-backups/naftamon-web-backup.sqlite3"
-docker compose stop web
+docker compose stop web notifications
 docker compose cp "$HOME/naftamon-backups/naftamon-web-backup.sqlite3" web:/data/naftamon-restore.sqlite3
 docker compose run --rm --no-deps web python -c 'import os,sqlite3; s=sqlite3.connect("/data/naftamon-restore.sqlite3"); d=sqlite3.connect("/data/naftamon.sqlite3"); s.backup(d); d.close(); s.close(); os.remove("/data/naftamon-restore.sqlite3")'
-docker compose start web
+docker compose start web notifications
 curl --fail http://127.0.0.1:8080/healthz
 ```
 
@@ -207,7 +252,7 @@ Descarga o cambia al código de la versión que vas a desplegar, haz una copia d
 
 ## Seguridad y límites operativos
 
-El requisito de esta versión es no tener autenticación: cualquier cliente que alcance el puerto puede leer alertas y enviar snapshots falsos. Úsala solo en una LAN confiable o VPN, no la publiques en Internet y limita el acceso desde el firewall del host y la segmentación de red. CORS no autentica clientes ni sustituye estas restricciones. El Gateway no incluye credenciales de Thruk en su JSON; el backend no registra cuerpos y nunca ejecuta los valores recibidos. SQL usa parámetros y el frontend inserta datos como texto.
+El requisito de esta versión es no tener autenticación: cualquier cliente que alcance el puerto puede leer alertas, enviar snapshots falsos, modificar reglas y destinos, y solicitar envíos de prueba. Úsala solo en una LAN confiable o VPN, no la publiques en Internet y limita el acceso desde el firewall del host y la segmentación de red. CORS no autentica clientes ni sustituye estas restricciones. El Gateway no incluye credenciales de Thruk en su JSON; el backend no registra cuerpos y nunca ejecuta los valores recibidos. SQL usa parámetros y el frontend inserta datos como texto. Los destinos de notificación pueden transportar datos de infraestructura fuera de la LAN si el operador los configura; revísalos antes de habilitarlos.
 
 La identidad del emisor sigue siendo provisional (`source` + IP observada); conexiones compartidas por NAT o proxy se mezclan. La validación física entre dos computadoras y el despliegue en Docker Engine Linux dependen de la red y firewall del host; en esta entrega se verificaron Docker Desktop en Windows 11 y dos emisores dentro de contenedores aislados.
 

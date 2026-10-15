@@ -1,4 +1,7 @@
 .env
+.env.notifications-test
+.local/
+.test-local/
 .venv
 __pycache__/
 *.py[cod]

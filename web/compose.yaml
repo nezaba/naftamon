@@ -9,16 +9,34 @@ services:
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-8388608}
       OFFLINE_AFTER_SECONDS: ${OFFLINE_AFTER_SECONDS:-900}
       HISTORY_RETENTION_DAYS: ${HISTORY_RETENTION_DAYS:-90}
+      NOTIFICATION_KEY_FILE: /run/naftamon-secrets/notification.key
+      NOTIFICATION_ALLOWED_DESTINATION_CIDRS: ${NOTIFICATION_ALLOWED_DESTINATION_CIDRS:-}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:8000"
     volumes:
       - naftamon_web_data:/data
+      - ${NOTIFICATION_KEY_DIR:-./.local}:/run/naftamon-secrets:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  notifications:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    command: ["python", "-m", "app.notifications.worker"]
+    environment:
+      DATA_DIR: /data
+      OFFLINE_AFTER_SECONDS: ${OFFLINE_AFTER_SECONDS:-900}
+      NOTIFICATION_KEY_FILE: /run/naftamon-secrets/notification.key
+      NOTIFICATION_ALLOWED_DESTINATION_CIDRS: ${NOTIFICATION_ALLOWED_DESTINATION_CIDRS:-}
+    volumes:
+      - naftamon_web_data:/data
+      - ${NOTIFICATION_KEY_DIR:-./.local}:/run/naftamon-secrets:ro
 
   test:
     build:
@@ -30,7 +48,16 @@ services:
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-8388608}
       OFFLINE_AFTER_SECONDS: ${OFFLINE_AFTER_SECONDS:-900}
       HISTORY_RETENTION_DAYS: ${HISTORY_RETENTION_DAYS:-90}
+      NOTIFICATION_KEY_FILE: /run/naftamon-secrets/notification.key
+      NOTIFICATION_ALLOWED_DESTINATION_CIDRS: ${NOTIFICATION_ALLOWED_DESTINATION_CIDRS:-}
     command: ["python", "-m", "pytest", "-q", "tests"]
+
+  mock-provider:
+    build:
+      context: .
+      target: test
+    profiles: ["mock"]
+    command: ["python", "tests/mock_notification_server.py"]
 
 volumes:
   naftamon_web_data:

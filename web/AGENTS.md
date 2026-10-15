@@ -7,7 +7,7 @@ Antes de implementar ingestión, leer [el contrato real del Gateway](docs/webhoo
 Restricciones de esta versión:
 
 - No implementar autenticación: sin usuarios, passwords, API keys, bearer tokens, sesiones, OAuth ni roles en dashboard, receptor o APIs.
-- No añadir servicios externos, credenciales Thruk ni destinos productivos.
+- No añadir credenciales Thruk ni destinos productivos en pruebas. Los proveedores de notificaciones opcionales se configuran por el operador; usar mocks locales para validarlos.
 - No depender de CDN ni de conexión a Internet para usar el dashboard.
 - Diferenciar cero alertas de fuente stale y de servidor error/pending.
 - Reconciliar solo snapshots autoritativos de servidores ok; nunca resolver alertas por fallos o silencio.
@@ -20,6 +20,9 @@ Skills locales:
 - Contrato: ../.agents/skills/naftamon-webhook-contract/SKILL.md
 - Docker: ../.agents/skills/naftamon-web-docker/SKILL.md
 - Pruebas: ../.agents/skills/naftamon-web-testing/SKILL.md
+- Reglas: ../.agents/skills/naftamon-notification-rules/SKILL.md
+- Proveedores: ../.agents/skills/naftamon-notification-providers/SKILL.md
+- Pruebas de notificaciones: ../.agents/skills/naftamon-notification-testing/SKILL.md
 
 El proyecto incluye receptor, API de lectura, persistencia SQLite y dashboard local en HTML/CSS/JavaScript servido desde FastAPI. Mantener el dashboard sin recursos externos y sin autenticación. El dashboard debe consumir solo APIs del mismo origen y distinguir frescura de fuente de estado de consulta por servidor.
 

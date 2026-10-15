@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from .db import SCHEMA_VERSION, connect, initialize
 from .ingest import accept_snapshot, iso_utc
 from .models import Snapshot, TestMessage
+from .notifications.api import router as notifications_router
 from .settings import Settings
 
 
@@ -128,6 +129,7 @@ def create_app(
     initialize(app_settings.database_path)
     app = FastAPI(title="NaftaMon Web", version="1.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = app_settings
+    app.include_router(notifications_router)
     app.add_middleware(RequestSizeLimitMiddleware, max_bytes=app_settings.max_request_bytes)
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
