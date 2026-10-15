@@ -18,6 +18,8 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert "data-theme=\"light\"" in css.text
     assert "fetchAllAlerts" in js.text
     assert "/api/v1/alerts?limit=${limit}&offset=${offset}" in js.text
+    assert "textContent" in js.text
+    assert "innerHTML" not in js.text
 
 
 def test_dashboard_exposes_real_contract_fields_filters_and_history(client):

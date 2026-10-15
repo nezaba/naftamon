@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 # Add future schema changes as transactional SQL statements keyed by version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -71,6 +71,26 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_alerts_source_server ON active_alerts(source_id, server)",
         "CREATE INDEX idx_history_observed ON alert_history(observed_at DESC)",
         "CREATE INDEX idx_history_source_server ON alert_history(source_id, server)",
+    ),
+    2: (
+        "ALTER TABLE sources ADD COLUMN snapshot_revision INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE monitored_servers ADD COLUMN status_revision INTEGER NOT NULL DEFAULT 0",
+    ),
+    3: (
+        # Preserve the stale/fresh interpretation when upgrading a v1 database
+        # whose revision columns are initialized from timestamps and snapshot contents.
+        """UPDATE monitored_servers SET status_revision = CASE WHEN status_received_at < (
+               SELECT last_received_at FROM sources WHERE sources.id = monitored_servers.source_id
+           ) OR NOT EXISTS (
+               SELECT 1 FROM latest_snapshots AS latest,
+                 json_each(latest.payload_json, '$.servers') AS incoming
+               WHERE latest.source_id = monitored_servers.source_id
+                 AND json_extract(incoming.value, '$.server') = monitored_servers.name
+           ) THEN 0 ELSE 1 END
+           WHERE status_revision = 0 AND source_id IN (
+               SELECT id FROM sources WHERE snapshot_revision = 0
+           )""",
+        "UPDATE sources SET snapshot_revision = 1 WHERE snapshot_revision = 0",
     ),
 }
 

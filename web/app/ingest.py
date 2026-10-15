@@ -128,7 +128,6 @@ def accept_snapshot(
     peer_ip: str,
     retention_days: int,
 ) -> dict[str, Any]:
-    received_at = iso_utc()
     source_data = snapshot.model_dump(mode="json")
     hash_data = dict(source_data)
     hash_data.pop("timestamp", None)
@@ -137,24 +136,31 @@ def accept_snapshot(
     payload_json = json.dumps(source_data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     with connect(database_path) as db:
+        # Reserve SQLite's single writer before reading the revision. This makes
+        # concurrent snapshots from the same source serialize monotonically and
+        # also prevents two first-time requests from racing the unique source key.
+        db.execute("BEGIN IMMEDIATE")
+        received_at = iso_utc()
         row = db.execute(
-            "SELECT id FROM sources WHERE source_name = ? AND peer_ip = ?",
+            "SELECT id, snapshot_revision FROM sources WHERE source_name = ? AND peer_ip = ?",
             (snapshot.source, peer_ip),
         ).fetchone()
         if row is None:
             cursor = db.execute(
                 """INSERT INTO sources
-                   (source_name, peer_ip, first_received_at, last_received_at, payload_timestamp, complete)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   (source_name, peer_ip, first_received_at, last_received_at, payload_timestamp, complete, snapshot_revision)
+                   VALUES (?, ?, ?, ?, ?, ?, 1)""",
                 (snapshot.source, peer_ip, received_at, received_at, snapshot.timestamp, int(snapshot.complete)),
             )
             source_id = cursor.lastrowid
+            source_revision = 1
         else:
             source_id = row["id"]
+            source_revision = row["snapshot_revision"] + 1
             db.execute(
-                """UPDATE sources SET last_received_at = ?, payload_timestamp = ?, complete = ?
-                   WHERE id = ?""",
-                (received_at, snapshot.timestamp, int(snapshot.complete), source_id),
+                """UPDATE sources SET last_received_at = ?, payload_timestamp = ?, complete = ?,
+                   snapshot_revision = ? WHERE id = ?""",
+                (received_at, snapshot.timestamp, int(snapshot.complete), source_revision, source_id),
             )
 
         db.execute(
@@ -182,15 +188,15 @@ def accept_snapshot(
             if existing is None:
                 db.execute(
                     """INSERT INTO monitored_servers
-                       (source_id, name, status, status_received_at, last_ok_at, removed)
-                       VALUES (?, ?, ?, ?, ?, 0)""",
-                    (source_id, server.server, server.status, received_at, last_ok),
+                       (source_id, name, status, status_received_at, last_ok_at, removed, status_revision)
+                       VALUES (?, ?, ?, ?, ?, 0, ?)""",
+                    (source_id, server.server, server.status, received_at, last_ok, source_revision),
                 )
             else:
                 db.execute(
                     """UPDATE monitored_servers SET status = ?, status_received_at = ?,
-                       last_ok_at = COALESCE(?, last_ok_at), removed = 0 WHERE id = ?""",
-                    (server.status, received_at, last_ok, existing["id"]),
+                       last_ok_at = COALESCE(?, last_ok_at), removed = 0, status_revision = ? WHERE id = ?""",
+                    (server.status, received_at, last_ok, source_revision, existing["id"]),
                 )
             if server.status == "ok":
                 reconcile_server(db, source_id, server.server, alerts_by_server.get(server.server, []), received_at)

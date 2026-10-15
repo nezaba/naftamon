@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from .db import connect, initialize
+from .db import SCHEMA_VERSION, connect, initialize
 from .ingest import accept_snapshot, iso_utc
 from .models import Snapshot, TestMessage
 from .settings import Settings
@@ -86,7 +86,7 @@ def _bool(value: int) -> bool:
 
 
 def _stale_clause() -> str:
-    return "((julianday('now') - julianday(s.last_received_at)) * 86400 > ? OR ms.status != 'ok' OR ms.status_received_at < s.last_received_at OR ms.removed = 1)"
+    return "((julianday('now') - julianday(s.last_received_at)) * 86400 > ? OR ms.status != 'ok' OR ms.status_revision < s.snapshot_revision OR ms.removed = 1)"
 
 
 def _alert_dict(row, stale: bool) -> dict[str, Any]:
@@ -187,7 +187,7 @@ def create_app(
             for source in sources:
                 age = max(0, (now - datetime.fromisoformat(source["last_received_at"].replace("Z", "+00:00"))).total_seconds())
                 servers = db.execute(
-                    "SELECT name, status, status_received_at, last_ok_at, removed FROM monitored_servers WHERE source_id = ? ORDER BY name",
+                    "SELECT name, status, status_received_at, status_revision, last_ok_at, removed FROM monitored_servers WHERE source_id = ? ORDER BY name",
                     (source["id"],),
                 ).fetchall()
                 result.append(
@@ -200,7 +200,7 @@ def create_app(
                             {"name": server["name"], "status": server["status"],
                              "status_received_at": server["status_received_at"], "last_ok_at": server["last_ok_at"],
                              "removed": _bool(server["removed"]),
-                             "stale": server["removed"] or server["status"] != "ok" or server["status_received_at"] < source["last_received_at"]}
+                             "stale": server["removed"] or server["status"] != "ok" or server["status_revision"] < source["snapshot_revision"]}
                             for server in servers
                         ],
                     }
@@ -302,7 +302,18 @@ def create_app(
     def healthz():
         try:
             with connect(app_settings.database_path) as db:
-                db.execute("SELECT 1").fetchone()
+                version = db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+                tables = {
+                    row["name"] for row in db.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                required_tables = {
+                    "schema_version", "sources", "latest_snapshots", "monitored_servers",
+                    "active_alerts", "alert_history",
+                }
+                if version != SCHEMA_VERSION or not required_tables.issubset(tables):
+                    return JSONResponse({"status": "unhealthy", "database": "unavailable"}, status_code=503)
         except sqlite3.Error:
             return JSONResponse({"status": "unhealthy", "database": "unavailable"}, status_code=503)
         return {"status": "ok", "database": "ok"}

@@ -5,7 +5,12 @@ Dashboard local para ver alertas activas recibidas desde NaftaMon Desktop. Inclu
 ## Requisitos
 
 - Docker Desktop con Compose v2.
+- Docker Engine en Linux con Docker Compose v2 también es compatible; la validación de esta entrega se ejecutó en Windows 11 con Docker Desktop.
 - Para recibir datos desde otra computadora: ambos equipos en una LAN de confianza y la IP LAN privada del equipo que corre Docker.
+
+## Arquitectura
+
+FastAPI valida los snapshots del Gateway, los reconcilia en SQLite y sirve el dashboard local desde el mismo contenedor. Uvicorn escucha en `0.0.0.0:8000` dentro del contenedor; Compose publica el puerto del host en `127.0.0.1:8080` por defecto. La base vive en el volumen `naftamon_web_data`. No hay servicios de datos externos, login ni recursos remotos.
 
 La página principal en `http://127.0.0.1:8080/` abre directamente el dashboard, sin login. No usa cuentas, sesiones, API keys, tokens, CDN ni recursos remotos. El dashboard y las APIs son accesibles sin autenticación desde cualquier cliente que alcance el puerto. No lo expongas a Internet.
 
@@ -27,12 +32,22 @@ Desde `web/`, copia `.env.example` a `.env`. El valor predeterminado publica sol
 Copy-Item .env.example .env
 docker compose up -d --build
 docker compose ps
-docker compose logs -f web
+docker compose logs -f
 ```
 
 El backend queda en `http://127.0.0.1:8080`. El health check está en `/healthz`. Para parar sin borrar datos:
 
 ```powershell
+docker compose down
+```
+
+En Linux, desde `web/`:
+
+```sh
+cp .env.example .env
+docker compose up -d --build
+docker compose ps
+docker compose logs -f
 docker compose down
 ```
 
@@ -43,14 +58,14 @@ SQLite persiste en el volumen nombrado `naftamon_web_data`, incluso al recrear e
 En `.env`, configura `BIND_ADDRESS` con la IP LAN privada del equipo host y `WEB_PORT` con el puerto permitido, por ejemplo:
 
 ```dotenv
-BIND_ADDRESS=192.168.1.20
+BIND_ADDRESS=192.168.1.200
 WEB_PORT=8080
 ```
 
 Recrea el servicio con `docker compose up -d`. En la configuración del Gateway de Desktop usa:
 
 ```text
-http://192.168.1.20:8080/api/v1/ingest
+http://192.168.1.200:8080/api/v1/ingest
 ```
 
 Reemplaza la dirección por la IP real del host. No uses `localhost` desde la computadora Desktop: allí apuntaría a la propia computadora Desktop.
@@ -58,10 +73,19 @@ Reemplaza la dirección por la IP real del host. No uses `localhost` desde la co
 Como no hay autenticación, limita el acceso en Windows Defender Firewall a la interfaz y subred confiables. Por ejemplo, desde PowerShell elevado, adapta IP, puerto y subred antes de crear la regla:
 
 ```powershell
-New-NetFirewallRule -DisplayName "NaftaMon Web LAN" -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.20 -LocalPort 8080 -RemoteAddress 192.168.1.0/24 -Profile Private
+New-NetFirewallRule -DisplayName "NaftaMon Web LAN" -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.200 -LocalPort 8080 -RemoteAddress 192.168.1.0/24 -Profile Private
 ```
 
 Usa una VLAN/subred de confianza; no habilites reglas para `Any`, perfil `Public`, port forwarding ni acceso entrante desde Internet. Revisa también las reglas de Docker Desktop y del router. HTTP no cifra el tráfico. Cualquier equipo que alcance el puerto puede enviar datos falsos y leer las APIs.
+
+En Docker Engine con backend iptables, Docker enruta los puertos publicados antes de las reglas habituales de UFW. No confíes solamente en `ufw allow/deny` para restringir este puerto; usa el firewall de red o reglas verificadas en `DOCKER-USER`. Sustituye interfaz y subred por los valores reales:
+
+```sh
+sudo iptables -I DOCKER-USER 1 -i enp3s0 -p tcp -s 192.168.1.0/24 -m conntrack --ctorigdstport 8080 -j ACCEPT
+sudo iptables -I DOCKER-USER 2 -i enp3s0 -p tcp -m conntrack --ctorigdstport 8080 -j DROP
+```
+
+Estas reglas aplican al backend iptables de Docker; no son persistentes en todas las distribuciones. Configura su persistencia con el gestor de firewall del host y prueba desde una IP permitida y otra denegada. Si Docker usa backend nftables, configura la regla equivalente con nftables. Consulta la [documentación de Docker sobre firewall y puertos publicados](https://docs.docker.com/engine/network/packet-filtering-firewalls/).
 
 ## Configuración
 
@@ -77,6 +101,8 @@ Compose carga estos valores desde `.env` o variables de entorno. `.env` no conti
 
 ## Endpoint de ingesta
 
+El Gateway actual envía `Content-Type: application/json; charset=utf-8` y `User-Agent: NaftaMon WebhookGateway`; el backend acepta el parámetro `charset` y no exige ese User-Agent ni ningún header de identidad. Valida `source` como el literal actual `NaftaMon`. La ruta no requiere API key, bearer token ni login.
+
 `POST /api/v1/ingest` recibe el JSON real descrito en [docs/webhook-contract.md](docs/webhook-contract.md). No exige headers especiales, API key, bearer token ni login. Los mensajes `type: test` se aceptan con `202`, pero no crean una fuente, refrescan su conectividad ni alteran snapshot, alertas o historial.
 
 Respuestas: `202` para mensajes aceptados; `400` para JSON malformado; `413` cuando el cuerpo supera el límite; `415` si no es `application/json`; `422` para un JSON válido con estructura o semántica incorrecta; `503` si SQLite no puede guardar el snapshot.
@@ -84,6 +110,8 @@ Respuestas: `202` para mensajes aceptados; `400` para JSON malformado; `413` cua
 Los snapshots completos y parciales se procesan por servidor. Solo `status: ok` confirma las alertas de ese servidor; el fallo/pending conserva las alertas conocidas como no confirmadas. Una lista vacía de alertas en servidor `ok` resuelve las alertas anteriores de ese servidor. La fuente offline conserva el último estado conocido y presenta sus alertas como stale.
 
 El formato no tiene ID de instalación. Para evitar una identidad inventada, el backend agrupa provisionalmente por `source` y la IP observada del peer TCP. Es una aproximación no estable: dos instancias en la misma computadora se mezclan; NAT, contenedores y proxies pueden alterar la agrupación. `source` y la IP no son credenciales. Una extensión opcional `instance_id` en Desktop sería la solución compatible futura.
+
+En esta versión debe haber como máximo un Gateway lógico detrás de cada IP que el receptor observa, con nombres de servidores Thruk que no colisionen. Dos Desktop detrás de la misma IP/NAT no se distinguen y sus snapshots podrían reemplazarse o resolver alertas entre sí. El JSON actual no permite corregirlo desde NaftaMon Web sin cambiar el contrato.
 
 ## APIs sin autenticación
 
@@ -114,14 +142,83 @@ Invoke-RestMethod http://127.0.0.1:8080/api/v1/sources
 docker compose restart web
 ```
 
+En Linux, los comandos equivalentes son:
+
+```sh
+docker compose --profile test run --build --rm test
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail 100 web
+curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:8080/api/v1/sources
+docker compose restart web
+```
+
+### Backup y restauración SQLite
+
+Usa la API de backup de SQLite para incluir de forma consistente las escrituras en WAL. Guarda la copia fuera del repositorio y del volumen, y protégela como dato de monitoreo. Ejemplo PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\naftamon-backups" | Out-Null
+docker compose exec -T web python -c "import sqlite3; s=sqlite3.connect('/data/naftamon.sqlite3'); d=sqlite3.connect('/tmp/naftamon-backup.sqlite3'); s.backup(d); d.close(); s.close()"
+docker compose cp web:/tmp/naftamon-backup.sqlite3 "$env:USERPROFILE\naftamon-backups\naftamon-web-backup.sqlite3"
+```
+
+Para restaurar, detén el servicio, copia la base al volumen y usa la API SQLite para reemplazar el contenido:
+
+```powershell
+docker compose stop web
+docker compose cp "$env:USERPROFILE\naftamon-backups\naftamon-web-backup.sqlite3" web:/data/naftamon-restore.sqlite3
+docker compose run --rm --no-deps web python -c "import os,sqlite3; s=sqlite3.connect('/data/naftamon-restore.sqlite3'); d=sqlite3.connect('/data/naftamon.sqlite3'); s.backup(d); d.close(); s.close(); os.remove('/data/naftamon-restore.sqlite3')"
+docker compose start web
+Invoke-RestMethod http://127.0.0.1:8080/healthz
+```
+
+En Linux se usa `$HOME/naftamon-backups` fuera del repositorio. El directorio y el archivo quedan accesibles solo al usuario actual:
+
+```sh
+umask 077
+mkdir -p "$HOME/naftamon-backups"
+chmod 700 "$HOME/naftamon-backups"
+docker compose exec -T web python -c 'import sqlite3; s=sqlite3.connect("/data/naftamon.sqlite3"); d=sqlite3.connect("/tmp/naftamon-backup.sqlite3"); s.backup(d); d.close(); s.close()'
+docker compose cp web:/tmp/naftamon-backup.sqlite3 "$HOME/naftamon-backups/naftamon-web-backup.sqlite3"
+chmod 600 "$HOME/naftamon-backups/naftamon-web-backup.sqlite3"
+docker compose stop web
+docker compose cp "$HOME/naftamon-backups/naftamon-web-backup.sqlite3" web:/data/naftamon-restore.sqlite3
+docker compose run --rm --no-deps web python -c 'import os,sqlite3; s=sqlite3.connect("/data/naftamon-restore.sqlite3"); d=sqlite3.connect("/data/naftamon.sqlite3"); s.backup(d); d.close(); s.close(); os.remove("/data/naftamon-restore.sqlite3")'
+docker compose start web
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+Haz una copia antes de actualizar. `docker compose down` conserva el volumen; `docker compose down -v` lo elimina y borra la base, así que no es un procedimiento de backup.
+
+### Actualización
+
+Descarga o cambia al código de la versión que vas a desplegar, haz una copia de SQLite y ejecuta `docker compose up -d --build` desde `web/`. Las migraciones del esquema se aplican al iniciar. Comprueba `docker compose ps`, `/healthz` y los logs antes de volver a configurar el Gateway.
+
+### Diagnóstico
+
+- `docker compose ps` muestra el estado del healthcheck. `healthy` verifica que el esquema versionado y las tablas requeridas respondan a consultas pequeñas; no ejecuta un recorrido completo de integridad ni comprueba que el volumen permita escrituras. `unhealthy` devuelve `503` en `/healthz`.
+- `docker compose logs --tail 100 web` muestra inicio y códigos HTTP, pero no guarda cuerpos de webhook.
+- `docker compose restart web` reinicia el proceso y conserva el volumen. `restart: unless-stopped` reinicia el contenedor si el proceso termina; Docker Compose no reinicia automáticamente un contenedor solo porque el healthcheck quede `unhealthy`.
+- `connection refused`: confirma `WEB_PORT`, `BIND_ADDRESS`, `docker compose ps` y la regla de firewall.
+- `400`, `413`, `415` o `422` en POST: revisa UTF-8 JSON, Content-Type, límite de 8 MiB y esquema de [webhook-contract.md](docs/webhook-contract.md).
+- Sin fuentes: confirma que el Gateway use la IP del host Docker, no `localhost`, y que la regla de firewall permita la computadora emisora.
+
+## Seguridad y límites operativos
+
+El requisito de esta versión es no tener autenticación: cualquier cliente que alcance el puerto puede leer alertas y enviar snapshots falsos. Úsala solo en una LAN confiable o VPN, no la publiques en Internet y limita el acceso desde el firewall del host y la segmentación de red. CORS no autentica clientes ni sustituye estas restricciones. El Gateway no incluye credenciales de Thruk en su JSON; el backend no registra cuerpos y nunca ejecuta los valores recibidos. SQL usa parámetros y el frontend inserta datos como texto.
+
+La identidad del emisor sigue siendo provisional (`source` + IP observada); conexiones compartidas por NAT o proxy se mezclan. La validación física entre dos computadoras y el despliegue en Docker Engine Linux dependen de la red y firewall del host; en esta entrega se verificaron Docker Desktop en Windows 11 y dos emisores dentro de contenedores aislados.
+
 Para inspeccionar una recepción, usa el dashboard o consulta `/api/v1/alerts`, `/api/v1/sources` y `/api/v1/history`; los logs del contenedor muestran el estado HTTP, no registran el cuerpo del webhook. El reinicio del contenedor conserva el volumen `naftamon_web_data`.
 
-La suite de pytest cubre persistencia al recrear la aplicación sobre el mismo archivo SQLite. Para probar además un reinicio real del contenedor en Windows PowerShell, ejecuta desde `web/`:
+La suite de pytest cubre persistencia al recrear la aplicación sobre el mismo archivo SQLite. Para probar restart, force-recreate, backup online y restauración real del volumen mediante Docker en Windows PowerShell, ejecuta desde `web/`:
 
 ```powershell
 .\tests\test-container-persistence.ps1
 ```
 
-El script crea un proyecto Compose y puerto loopback únicos, envía un snapshot ficticio, reinicia y recrea el servicio `web`, comprueba que la alerta persiste en ambos casos y elimina únicamente el proyecto temporal y su volumen.
+El script crea un proyecto Compose y puerto loopback únicos, envía un snapshot ficticio, reinicia y recrea el servicio `web`, genera una copia con `sqlite3.Connection.backup`, restaura el fixture en el volumen y comprueba la alerta. Al terminar elimina únicamente el proyecto temporal, su volumen y el archivo de backup temporal.
 
 Las dependencias de ejecución y prueba están fijadas en `requirements.txt` y `requirements-dev.txt`. Docker necesita acceso a PyPI durante la construcción inicial; una vez construida la imagen, backend y API no llaman a servicios externos.

@@ -1,7 +1,12 @@
+import json
+import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
+from app.db import MIGRATIONS
 from app.main import create_app
 
 
@@ -23,7 +28,15 @@ def snapshot(alerts=None, *, timestamp="2026-10-14T22:00:00.000Z", complete=True
 
 
 def test_valid_webhook_and_unauthenticated_read_apis(client):
-    response = client.post("/api/v1/ingest", json=snapshot([alert()]))
+    body = json.dumps(snapshot([alert()])).encode("utf-8")
+    response = client.post(
+        "/api/v1/ingest",
+        content=body,
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "NaftaMon WebhookGateway",
+        },
+    )
     assert response.status_code == 202
     assert response.json()["accepted"] is True
     assert response.json()["kind"] == "snapshot"
@@ -112,6 +125,71 @@ def test_partial_snapshot_reconciles_ok_and_preserves_error_server_alerts(app_fa
         assert next(row for row in items if row["host"] == "db01")["stale"] is False
 
 
+def test_partial_snapshot_marks_omitted_server_stale_when_receipt_times_match(client, monkeypatch):
+    same_received_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    monkeypatch.setattr("app.ingest.iso_utc", lambda value=None: same_received_at)
+    first = snapshot(
+        [alert(host="old-db", server="Thruk A")],
+        timestamp=same_received_at,
+        servers=[{"server": "Thruk A", "status": "ok"}, {"server": "Thruk B", "status": "ok"}],
+    )
+    assert client.post("/api/v1/ingest", json=first).status_code == 202
+
+    partial = snapshot(
+        [alert(host="new-db", server="Thruk B")],
+        timestamp=same_received_at,
+        complete=False,
+        servers=[{"server": "Thruk B", "status": "ok"}, {"server": "Thruk C", "status": "error"}],
+    )
+    assert client.post("/api/v1/ingest", json=partial).status_code == 202
+
+    items = {row["host"]: row for row in client.get("/api/v1/alerts").json()["items"]}
+    assert items["old-db"]["stale"] is True
+    assert items["new-db"]["stale"] is False
+
+
+def test_concurrent_snapshots_from_same_source_are_serialized(app_factory):
+    app = app_factory()
+    peer = ("10.0.0.50", 5000)
+    initial = snapshot(
+        [alert(host="old-db", server="Thruk A")],
+        timestamp="2026-10-14T22:00:00.000Z",
+        servers=[{"server": "Thruk A", "status": "ok"}, {"server": "Thruk B", "status": "ok"}],
+    )
+    full = snapshot(
+        [alert(host="old-db", server="Thruk A"), alert(host="db-b", server="Thruk B")],
+        timestamp="2026-10-14T22:01:00.000Z",
+        servers=[{"server": "Thruk A", "status": "ok"}, {"server": "Thruk B", "status": "ok"}],
+    )
+    partial = snapshot(
+        [alert(host="db-b", server="Thruk B")],
+        timestamp="2026-10-14T22:02:00.000Z",
+        complete=False,
+        servers=[{"server": "Thruk B", "status": "ok"}, {"server": "Thruk C", "status": "error"}],
+    )
+
+    with TestClient(app, client=peer) as setup_client:
+        assert setup_client.post("/api/v1/ingest", json=initial).status_code == 202
+
+    def send(body):
+        with TestClient(app, client=peer) as concurrent_client:
+            return concurrent_client.post("/api/v1/ingest", json=body)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(send, (full, partial)))
+
+    assert [response.status_code for response in responses] == [202, 202]
+    with TestClient(app, client=peer) as verify_client:
+        sources = verify_client.get("/api/v1/sources").json()["items"]
+        assert len(sources) == 1
+        latest_timestamp = sources[0]["payload_timestamp"]
+        latest_received_at = sources[0]["last_received_at"]
+        alerts = {row["host"]: row for row in verify_client.get("/api/v1/alerts").json()["items"]}
+    assert alerts["old-db"]["stale"] is (latest_timestamp == partial["timestamp"])
+    assert alerts["db-b"]["stale"] is False
+    assert latest_received_at == max(response.json()["received_at"] for response in responses)
+
+
 def test_test_webhook_does_not_create_source_or_replace_snapshot(client):
     client.post("/api/v1/ingest", json=snapshot([alert()]))
     before = client.get("/api/v1/sources").json()
@@ -124,6 +202,8 @@ def test_test_webhook_does_not_create_source_or_replace_snapshot(client):
     assert response.json()["kind"] == "test"
     assert client.get("/api/v1/sources").json() == before
     assert client.get("/api/v1/alerts").json()["total"] == 1
+    invalid_source = {**test_message, "source": "unrecognized-sender"}
+    assert client.post("/api/v1/ingest", json=invalid_source).status_code == 422
 
 
 def test_observed_peer_ip_is_only_a_weak_fallback_for_grouping(app_factory):
@@ -169,3 +249,113 @@ def test_semantically_invalid_server_and_alert_relationship(client):
     assert client.post("/api/v1/ingest", json=body).status_code == 422
     duplicate = snapshot([alert(), alert()])
     assert client.post("/api/v1/ingest", json=duplicate).status_code == 422
+    wrong_source = snapshot([alert()], source="another-sender")
+    assert client.post("/api/v1/ingest", json=wrong_source).status_code == 422
+
+
+def test_healthcheck_rejects_missing_database_schema(app_factory, tmp_path):
+    database_path = tmp_path / "deleted.sqlite3"
+    app = app_factory(database_path=database_path)
+    with TestClient(app) as client:
+        database_path.unlink()
+        response = client.get("/healthz")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unhealthy", "database": "unavailable"}
+
+
+def test_v1_database_migration_preserves_stale_server_state(tmp_path):
+    database_path = tmp_path / "legacy-v1.sqlite3"
+    now = datetime.now(timezone.utc)
+    older_status = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    latest_snapshot = now.replace(microsecond=0) + timedelta(seconds=10)
+    latest_received = latest_snapshot.isoformat().replace("+00:00", "Z")
+    alert_row = alert(host="legacy-db")
+
+    with sqlite3.connect(database_path) as db:
+        db.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        for statement in MIGRATIONS[1]:
+            db.execute(statement)
+        db.execute("INSERT INTO schema_version(version) VALUES (1)")
+        db.execute(
+            """INSERT INTO sources
+               (id, source_name, peer_ip, first_received_at, last_received_at, payload_timestamp, complete)
+               VALUES (1, 'NaftaMon', '10.0.0.60', ?, ?, ?, 0)""",
+            (older_status, latest_received, latest_received),
+        )
+        db.execute(
+            """INSERT INTO latest_snapshots
+               (source_id, payload_json, content_hash, payload_timestamp, received_at, complete)
+               VALUES (1, '{}', 'legacy-hash', ?, ?, 0)""",
+            (latest_received, latest_received),
+        )
+        db.execute(
+            """INSERT INTO monitored_servers
+               (source_id, name, status, status_received_at, last_ok_at, removed)
+               VALUES (1, 'Thruk oficina', 'ok', ?, ?, 0)""",
+            (older_status, older_status),
+        )
+        db.execute(
+            """INSERT INTO active_alerts
+               (source_id, server, backend, host, service, type, state, hard, acknowledged, downtime,
+                last_check, last_change, first_seen_at, last_seen_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("Thruk oficina", alert_row["backend"], alert_row["host"], alert_row["service"], alert_row["type"],
+             alert_row["state"], 1, 0, 0, alert_row["last_check"], alert_row["last_change"], older_status, older_status),
+        )
+
+    app = create_app(database_path=database_path, offline_after_seconds=3600)
+    with TestClient(app) as client:
+        migrated_alert = client.get("/api/v1/alerts").json()["items"][0]
+        assert migrated_alert["stale"] is True
+        assert client.get("/healthz").json() == {"status": "ok", "database": "ok"}
+
+
+def test_v2_migration_preserves_revision_based_stale_state(tmp_path):
+    database_path = tmp_path / "legacy-v2.sqlite3"
+    received_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    alert_row = alert(host="legacy-v2-db")
+    snapshot_json = json.dumps({
+        "timestamp": received_at,
+        "source": "NaftaMon",
+        "complete": False,
+        "servers": [{"server": "Thruk B", "status": "ok"}, {"server": "Thruk C", "status": "error"}],
+        "alerts": [],
+    })
+
+    with sqlite3.connect(database_path) as db:
+        db.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        for version in (1, 2):
+            for statement in MIGRATIONS[version]:
+                db.execute(statement)
+            db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
+        db.execute(
+            """INSERT INTO sources
+               (id, source_name, peer_ip, first_received_at, last_received_at, payload_timestamp, complete, snapshot_revision)
+               VALUES (1, 'NaftaMon', '10.0.0.61', ?, ?, ?, 0, 2)""",
+            (received_at, received_at, received_at),
+        )
+        db.execute(
+            """INSERT INTO latest_snapshots
+               (source_id, payload_json, content_hash, payload_timestamp, received_at, complete)
+               VALUES (1, ?, 'v2-hash', ?, ?, 0)""",
+            (snapshot_json, received_at, received_at),
+        )
+        db.execute(
+            """INSERT INTO monitored_servers
+               (source_id, name, status, status_received_at, last_ok_at, removed, status_revision)
+               VALUES (1, 'Thruk oficina', 'ok', ?, ?, 0, 1)""",
+            (received_at, received_at),
+        )
+        db.execute(
+            """INSERT INTO active_alerts
+               (source_id, server, backend, host, service, type, state, hard, acknowledged, downtime,
+                last_check, last_change, first_seen_at, last_seen_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("Thruk oficina", alert_row["backend"], alert_row["host"], alert_row["service"], alert_row["type"],
+             alert_row["state"], 1, 0, 0, alert_row["last_check"], alert_row["last_change"], received_at, received_at),
+        )
+
+    app = create_app(database_path=database_path, offline_after_seconds=3600)
+    with TestClient(app) as client:
+        migrated_alert = client.get("/api/v1/alerts").json()["items"][0]
+    assert migrated_alert["stale"] is True

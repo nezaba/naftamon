@@ -51,7 +51,7 @@ class Alert(StrictModel):
 
 class Snapshot(StrictModel):
     timestamp: str = Field(max_length=64)
-    source: str = Field(min_length=1, max_length=128)
+    source: Literal["NaftaMon"]
     complete: StrictBool
     servers: list[ServerStatus] = Field(max_length=1000)
     alerts: list[Alert] = Field(max_length=100000)
@@ -81,7 +81,7 @@ class Snapshot(StrictModel):
 class TestMessage(StrictModel):
     type: Literal["test"]
     test: Literal[True]
-    source: str = Field(min_length=1, max_length=128)
+    source: Literal["NaftaMon"]
     timestamp: str = Field(max_length=64)
     message: str = Field(min_length=1, max_length=512)
 
