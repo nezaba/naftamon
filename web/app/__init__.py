@@ -1,0 +1,1 @@
+"""NaftaMon Web backend."""

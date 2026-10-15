@@ -142,13 +142,13 @@ Test Webhook envía un mensaje separado, sin complete, servers ni alerts. No deb
 
 El JSON no contiene ID estable de la instalación emisora. source siempre vale NaftaMon; server es un nombre editable; backend identifica el peer de Thruk, no al emisor. Dos instalaciones con nombres de servidor iguales no se distinguen de forma confiable solo con el cuerpo JSON.
 
-Solución compatible sin modificar Desktop: configurar una URL de recepción diferente por instalación, por ejemplo /webhooks/naftamon/oficina y /webhooks/naftamon/lab, y usar esa etiqueta de ruta para agrupar los datos. La URL del Gateway es configurable. La etiqueta es dato de agrupación, **no** credencial ni autenticación: cualquier cliente de la LAN puede falsificarla.
+El endpoint de la etapa 2 es exactamente `POST /api/v1/ingest` y no añade headers ni credenciales obligatorios. Para agrupar datos sin cambiar el Gateway se usa provisionalmente el par `source` + IP observada de la conexión TCP. Esto no identifica instalaciones de forma confiable: procesos en una computadora comparten IP, dispositivos detrás de NAT pueden compartir dirección, y un proxy puede ocultar el emisor real. El receptor ignora cabeceras de forwarding del cliente y no considera la IP autenticación. La solución de largo plazo es un `instance_id` opcional estable en el JSON, conservando aceptación de clientes actuales.
 
 Futura mejora compatible: añadir instance_id opcional o una cabecera de identificación estable, manteniendo aceptación de los mensajes actuales. No se modifica Gateway en esta etapa.
 
 Otros límites:
 
-- No hay ID de alerta, secuencia, versión de schema ni ID de entrega. Clave compuesta sugerida: etiqueta de emisor + server + backend + type + host + service.
+- No hay ID de alerta, secuencia, versión de schema ni ID de entrega. Clave compuesta sugerida: grupo provisional source + peer IP + server + backend + type + host + service.
 - No se informa el intervalo configurado ni cuándo terminó el último polling; el receptor debe guardar su received_at.
 - last_change informa el cambio conocido por Thruk, no la hora exacta de recuperación.
 - No hay reintentos durables prometidos si el receptor está caído; los snapshots no recibidos no se reconstruyen.

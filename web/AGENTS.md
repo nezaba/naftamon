@@ -11,7 +11,8 @@ Restricciones de esta versión:
 - No depender de CDN ni de conexión a Internet para usar el dashboard.
 - Diferenciar cero alertas de fuente stale y de servidor error/pending.
 - Reconciliar solo snapshots autoritativos de servidores ok; nunca resolver alertas por fallos o silencio.
-- La etiqueta de emisor en la ruta agrupa datos; no es autenticación ni secreto.
+- El receptor público de esta etapa es `POST /api/v1/ingest`, sin credenciales ni headers obligatorios.
+- Como el JSON no identifica una instalación, se agrupa provisionalmente por `source` y la IP observada del peer TCP. Es una heurística débil, no autenticación; no confiar en `X-Forwarded-For` ni en la IP para seguridad.
 - Publicar solo en loopback o IP privada escogida, y restringir Windows Firewall a red confiable.
 
 Skills locales:
@@ -20,4 +21,4 @@ Skills locales:
 - Docker: ../.agents/skills/naftamon-web-docker/SKILL.md
 - Pruebas: ../.agents/skills/naftamon-web-testing/SKILL.md
 
-Esta etapa solo prepara análisis y arquitectura. No añadir backend, frontend ni Compose hasta que se pida iniciar implementación.
+La etapa 2 implementa receptor, API de lectura y persistencia en SQLite. No iniciar todavía el dashboard visual completo salvo que se solicite explícitamente.
