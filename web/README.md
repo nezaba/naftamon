@@ -26,6 +26,18 @@ La pestaña **Historial de cambios** muestra aperturas, cambios de estado/atribu
 
 ## Ejecutar
 
+Para iniciar `web` y `notifications` en un solo paso, usá los scripts de `web/scripts/`. Funcionan desde cualquier directorio, crean `.env` desde `.env.example` si falta y generan `notification.key` solo si todavía no existe. Requieren Docker Desktop o Docker Engine con Compose. No cambian una configuración ni una clave existentes.
+
+```powershell
+.\scripts\start-web.ps1
+```
+
+```sh
+./scripts/start-web.sh
+```
+
+Los scripts muestran el estado de ambos contenedores al terminar. El motor de notificaciones sigue desactivado en la aplicación hasta que se habilite desde **Notifications**. Revisá `BIND_ADDRESS` y `WEB_PORT` en `.env` antes de dar acceso desde la LAN. Para ver logs: `docker compose logs -f web notifications`; para detener sin borrar SQLite: `docker compose down`.
+
 Desde `web/`, copia `.env.example` a `.env`. El valor predeterminado publica solo en loopback, para uso en el mismo equipo:
 
 ```powershell
