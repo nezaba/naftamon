@@ -29,8 +29,10 @@ signals:
 
 private:
     QJsonObject snapshot() const;
+    static QJsonObject legacyCompatiblePayload(QJsonObject payload);
     void cancelInFlight();
-    bool post(const QUrl &url, const QJsonObject &payload, bool test);
+    bool post(const QUrl &url, const QJsonObject &payload, bool test,
+              bool allowCompatibilityFallback = false);
 
     QVector<QPointer<ThrukServer>> servers_;
     QNetworkAccessManager network_;
@@ -39,6 +41,7 @@ private:
     QPointer<QNetworkReply> testInFlight_;
     QUrl url_;
     bool enabled_ = false;
+    bool legacyPayloadMode_ = false;
     int intervalSeconds_ = 60;
     int timeoutMs_ = 10000;
 };

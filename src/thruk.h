@@ -85,4 +85,4 @@ private:
 QByteArray formEncode(const QList<QPair<QString, QString>> &params);
 CmdForm parseCmdForm(const QString &html);
 bool parseStatusJson(const QByteArray &json, bool isHost, const QString &server, bool displayName,
-                     QVector<Item> *out);
+                     QVector<Item> *out, QVector<Item> *okStatuses = nullptr);

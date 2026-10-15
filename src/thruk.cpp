@@ -10,16 +10,18 @@
 #include <QTimer>
 #include <memory>
 
-// Nagstamon's Thruk.py queries, lighter: Nagstamon also ORs in every host in downtime, acknowledged,
-// soft, with notifications or checks disabled (thousands on big setups, re-parsed every poll) only to
-// know the flags of hosts with problem services. Those come with each service row instead (host_*).
+// Nagstamon's Thruk.py queries, lighter: include UP/OK alongside the existing problem states so the
+// Gateway can publish a complete monitoring view without making additional calls. Nagstamon also
+// ORs in every host in downtime, acknowledged, soft, with notifications or checks disabled
+// (thousands on big setups, re-parsed every poll) only to know flags of hosts with problem services.
+// Those come with each service row instead (host_*).
 static const char HOSTS_QUERY[] =
-    "/status.cgi?hostgroup=all&style=hostdetail&hoststatustypes=12"
+    "/status.cgi?hostgroup=all&style=hostdetail&hoststatustypes=14"
     "&view_mode=json&entries=all&columns=name,state,last_check,last_state_change,plugin_output,"
     "current_attempt,max_check_attempts,active_checks_enabled,notifications_enabled,is_flapping,"
     "acknowledged,scheduled_downtime_depth,state_type,host_display_name,display_name,peer_name";
 static const char SERVICES_QUERY[] =
-    "/status.cgi?host=all&servicestatustypes=28&view_mode=json&entries=all&columns=host_name,"
+    "/status.cgi?host=all&servicestatustypes=30&view_mode=json&entries=all&columns=host_name,"
     "description,state,last_check,last_state_change,plugin_output,current_attempt,max_check_attempts,"
     "active_checks_enabled,is_flapping,notifications_enabled,acknowledged,state_type,"
     "scheduled_downtime_depth,host_display_name,display_name,host_state,host_acknowledged,"
@@ -72,7 +74,7 @@ CmdForm parseCmdForm(const QString &html) {
 static qint64 num(const QJsonValue &v) { return v.toVariant().toLongLong(); }
 
 bool parseStatusJson(const QByteArray &json, bool isHost, const QString &server, bool displayName,
-                     QVector<Item> *out) {
+                     QVector<Item> *out, QVector<Item> *okStatuses) {
     QJsonParseError err;
     QJsonDocument doc = QJsonDocument::fromJson(json, &err);
     if (err.error != QJsonParseError::NoError || !doc.isArray()) return false;
@@ -92,7 +94,6 @@ bool parseStatusJson(const QByteArray &json, bool isHost, const QString &server,
             i.realService = o["description"].toString();
             i.service = displayName ? o["display_name"].toString() : i.realService;
             i.state = st == 1 ? WARNING : st == 2 ? CRITICAL : st == 3 ? UNKNOWN : UP;
-            if (i.state == UP) continue;  // servicestatustypes=28 never returns OK, be safe anyway
             int hs = int(num(o["host_state"]));
             i.hostInfo = {num(o["host_acknowledged"]) != 0, num(o["host_scheduled_downtime_depth"]) != 0,
                           num(o["host_is_flapping"]) != 0,
@@ -104,12 +105,18 @@ bool parseStatusJson(const QByteArray &json, bool isHost, const QString &server,
         i.lastChange = num(o["last_state_change"]);
         i.attempt = int(num(o["current_attempt"]));
         i.maxAttempts = int(num(o["max_check_attempts"]));
-        i.output = o["plugin_output"].toString().replace('\n', ' ').trimmed();
+        i.output = o["plugin_output"].toString();
         i.passive = num(o["active_checks_enabled"]) == 0;
         i.notifDisabled = num(o["notifications_enabled"]) == 0;
         i.flapping = num(o["is_flapping"]) != 0;  // Nagstamon uses notifications_enabled here for services (bug)
         i.ack = num(o["acknowledged"]) != 0;
         i.downtime = num(o["scheduled_downtime_depth"]) != 0;
+        if (i.state == UP) {
+            if (okStatuses) okStatuses->append(i);
+            // The existing host parser historically retained UP if a caller
+            // returned it; services have always discarded OK rows.
+            if (okStatuses || !isHost) continue;
+        }
         out->append(i);
     }
     return true;
@@ -285,8 +292,9 @@ void ThrukServer::finishPoll(QNetworkReply *h, QNetworkReply *s, qint64 started)
         return done();
     }
     RawStatus fresh;
-    if (!parseStatusJson(hb, true, conf.name, false, &fresh.hosts) ||
-        !parseStatusJson(sb, false, conf.name, conf.useDisplayNameService, &fresh.services)) {
+    if (!parseStatusJson(hb, true, conf.name, false, &fresh.hosts, &fresh.okStatuses) ||
+        !parseStatusJson(sb, false, conf.name, conf.useDisplayNameService, &fresh.services,
+                         &fresh.okStatuses)) {
         error = "Invalid JSON from Thruk";
         return done();
     }

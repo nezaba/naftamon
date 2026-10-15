@@ -72,7 +72,7 @@ QVector<Item> applyFilters(const RawStatus &raw, const Filters &f, qint64 now) {
         bool hide = (h.ack && f.acknowledged) || (h.notifDisabled && f.notificationsDisabled) ||
                     (h.passive && f.checksDisabled) || (h.downtime && f.downtime) ||
                     (h.flapping && f.allFlappingHosts) || (!h.hard && f.softHosts) ||
-                    f.reHost.filtersOut(h.host) || f.reInfo.filtersOut(h.output) ||
+                    f.reHost.filtersOut(h.host) || f.reInfo.filtersOut(h.displayOutput()) ||
                     (h.state == DOWN && f.allDownHosts) || (h.state == UNREACHABLE && f.allUnreachableHosts);
         if (!hide) out.append(h);
     }
@@ -86,7 +86,7 @@ QVector<Item> applyFilters(const RawStatus &raw, const Filters &f, qint64 now) {
                     (hf.ack && f.servicesOnAckHosts) || (hf.state == DOWN && f.servicesOnDownHosts) ||
                     (hf.state == UNREACHABLE && f.servicesOnUnreachableHosts) || (!s.hard && f.softServices) ||
                     f.reHost.filtersOut(s.host) || f.reService.filtersOut(s.service) ||
-                    f.reInfo.filtersOut(s.output) || f.reDuration.filtersOut(humanDuration(s.lastChange, now)) ||
+                    f.reInfo.filtersOut(s.displayOutput()) || f.reDuration.filtersOut(humanDuration(s.lastChange, now)) ||
                     f.reAttempt.filtersOut(attempt) || (s.state == CRITICAL && f.allCriticalServices) ||
                     (s.state == WARNING && f.allWarningServices) || (s.state == UNKNOWN && f.allUnknownServices);
         if (hide) continue;
@@ -118,7 +118,7 @@ static int compareField(const Item &a, const Item &b, int field) {
     case BY_LAST_CHECK: return num(a.lastCheck, b.lastCheck);
     case BY_DURATION: return num(b.lastChange, a.lastChange);  // later change = shorter duration
     case BY_ATTEMPT: return num(a.attempt, b.attempt);
-    default: return text(a.output, b.output);
+    default: return text(a.displayOutput(), b.displayOutput());
     }
 }
 

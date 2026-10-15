@@ -326,7 +326,7 @@ QVariant StatusModel::data(const QModelIndex &idx, int role) const {
         QStringList tip;
         QString flags = data(idx, FlagsRole).toString();
         for (QChar f : flags) tip << (idx.column() == Host && !i.isHost() ? "Host: " : "") + flagText(f);
-        tip << i.output;
+        tip << i.displayOutput();
         // escaped: Qt renders a tooltip that looks like HTML as HTML (plugin output is not trusted)
         return "<qt>" + tip.join('\n').toHtmlEscaped().replace('\n', "<br>") + "</qt>";
     }
@@ -350,7 +350,7 @@ QVariant StatusModel::data(const QModelIndex &idx, int role) const {
                                  : QDateTime::fromSecsSinceEpoch(i.lastCheck).toString("yyyy-MM-dd HH:mm:ss");
     case Duration: return humanDuration(i.lastChange, QDateTime::currentSecsSinceEpoch());
     case Attempt: return QString("%1/%2").arg(i.attempt).arg(i.maxAttempts);
-    case Info: return i.output;
+    case Info: return i.displayOutput();
     }
     return {};
 }
@@ -1475,7 +1475,7 @@ void App::contextMenu(const QPoint &pos) {
     };
     copy("Copy host", [](const Item &i) { return i.host; });
     copy("Copy service", [](const Item &i) { return i.service; });
-    copy("Copy status information", [](const Item &i) { return i.output; });
+    copy("Copy status information", [](const Item &i) { return i.displayOutput(); });
     m.exec(view->viewport()->mapToGlobal(pos));
 }
 
@@ -1560,7 +1560,7 @@ void App::maintenanceDialog() {
                     table->setItem(r, 0, b);
                     table->setItem(r, 1, new QTableWidgetItem(i.host));
                     table->setItem(r, 2, new QTableWidgetItem(relativeTime(i.lastCheck, now)));
-                    table->setItem(r, 3, new QTableWidgetItem(i.output));
+                    table->setItem(r, 3, new QTableWidgetItem(i.displayOutput()));
                 }
                 table->setSortingEnabled(true);
                 table->resizeColumnsToContents();
@@ -1599,7 +1599,7 @@ void App::recheckHostServices(const QVector<Item> &items) {
 void App::runAction(const CustomAction &a, const Item &i) {
     ThrukServer *s = serverOf(i);
     // values are quoted: host names or plugin output must never become shell code
-    QString cmd = expandCommand(a.command, {{"HOST", i.host}, {"SERVICE", i.service}, {"STATUS-INFO", i.output},
+    QString cmd = expandCommand(a.command, {{"HOST", i.host}, {"SERVICE", i.service}, {"STATUS-INFO", i.displayOutput()},
                                             {"USERNAME", s ? s->conf.user : QString()}, {"SERVER", i.server}});
     if (!a.terminal) {
         QProcess::startDetached("/bin/sh", {"-c", cmd});
