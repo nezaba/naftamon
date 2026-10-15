@@ -13,11 +13,15 @@
   const FIELD_OPTIONS = [
     ["source", "Fuente NaftaMon"], ["source_id", "ID local de fuente"], ["server", "Servidor Thruk"],
     ["backend", "Backend"], ["type", "Tipo de alerta"], ["host", "Host"], ["service", "Servicio"],
-    ["state", "Estado"], ["hard", "Hard state"], ["acknowledged", "Acknowledgement"], ["downtime", "Downtime"],
+    ["state", "Estado"], ["status_information", "Status Information"], ["hard", "Hard state"], ["acknowledged", "Acknowledgement"], ["downtime", "Downtime"],
   ];
   const OP_OPTIONS = [
     ["equals", "Igual a"], ["not_equals", "Distinto de"], ["contains", "Contiene"],
     ["not_contains", "No contiene"], ["starts_with", "Comienza con"], ["ends_with", "Termina con"], ["wildcard", "Wildcard (*, ?)"],
+  ];
+  const STATUS_INFORMATION_OP_OPTIONS = [
+    ["contains", "Contiene"], ["not_contains", "No contiene"],
+    ["equals", "Es exactamente igual"], ["not_equals", "No es exactamente igual"],
   ];
   const EVENT_LABELS = { opened: "Nueva alerta", state_changed: "Cambio de estado", recovered: "Recuperación", reminder: "Recordatorio" };
   const STATUS_LABELS = { pending: "Pendiente", in_flight: "En curso", sent: "Enviado", failed: "Fallido", cancelled: "Cancelado" };
@@ -285,7 +289,10 @@
     row.append(field, operation, valueWrap, remove);
     const syncValue = (selectedValue) => {
       const boolean = ["hard", "acknowledged", "downtime"].includes(field.value);
-      operation.replaceChildren(...OP_OPTIONS.filter(([key]) => !boolean || ["equals", "not_equals"].includes(key)).map(([value, label]) => { const option = node("option", "", label); option.value = value; return option; }));
+      const options = field.value === "status_information"
+        ? STATUS_INFORMATION_OP_OPTIONS
+        : OP_OPTIONS.filter(([key]) => !boolean || ["equals", "not_equals"].includes(key));
+      operation.replaceChildren(...options.map(([value, label]) => { const option = node("option", "", label); option.value = value; return option; }));
       operation.value = [...operation.options].some((option) => option.value === condition.operator) ? condition.operator : "equals";
       const current = selectedValue !== undefined ? selectedValue : condition.value;
       valueWrap.replaceChildren();
@@ -294,12 +301,12 @@
         for (const [value, label] of [["true", "Sí"], ["false", "No"]]) { const option = node("option", "", label); option.value = value; select.append(option); }
         select.value = String(Boolean(current === true || current === "true")); valueWrap.append(select);
       } else {
-        const input = node("input", "condition-value"); input.type = "text"; input.maxLength = 256; input.placeholder = "Valor de coincidencia"; input.setAttribute("aria-label", "Valor de condición");
+        const input = node("input", "condition-value"); input.type = "text"; input.maxLength = 256; input.placeholder = field.value === "status_information" ? "Texto de Status Information" : "Valor de coincidencia"; input.setAttribute("aria-label", "Valor de condición");
         input.value = String(current ?? ""); valueWrap.append(input);
       }
     };
     syncValue(condition.value);
-    field.addEventListener("change", () => { condition.field = field.value; condition.operator = "equals"; condition.value = ["hard", "acknowledged", "downtime"].includes(field.value) ? false : ""; syncValue(condition.value); });
+    field.addEventListener("change", () => { condition.field = field.value; condition.operator = field.value === "status_information" ? "contains" : "equals"; condition.value = ["hard", "acknowledged", "downtime"].includes(field.value) ? false : ""; syncValue(condition.value); });
     return row;
   }
   function renderConditionList(group = { operator: "AND", conditions: [] }) {

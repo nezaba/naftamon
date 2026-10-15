@@ -118,6 +118,11 @@ def test_notifications_ui_is_local_secret_safe_and_matches_api_contract(client):
     assert "innerHTML" not in script.text
     assert "notification-history-table" in css.text
     assert "@media (max-width: 540px)" in css.text
+    assert '["status_information", "Status Information"]' in script.text
+    assert 'field.value === "status_information"' in script.text
+    for operator_label in ("Contiene", "No contiene", "Es exactamente igual", "No es exactamente igual"):
+        assert operator_label in script.text
+    assert "no coincide, también con operadores negativos" in response.text
 
 
 def test_notifications_ui_has_no_dangling_static_element_selectors(client):

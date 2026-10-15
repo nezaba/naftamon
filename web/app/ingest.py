@@ -35,6 +35,16 @@ def alert_state(alert: Alert) -> str:
     )
 
 
+def _notification_alert(alert: Alert, previous: sqlite3.Row | None = None) -> dict[str, Any]:
+    """Keep absent legacy fields absent while retaining the last known value."""
+    value = alert.model_dump()
+    if "status_information" not in alert.model_fields_set:
+        value.pop("status_information", None)
+        if previous is not None and previous["status_information_available"]:
+            value["status_information"] = previous["status_information"]
+    return value
+
+
 def _payload_is_older(incoming: str, latest: str) -> bool:
     incoming_at = datetime.fromisoformat(incoming.replace("Z", "+00:00"))
     latest_at = datetime.fromisoformat(latest.replace("Z", "+00:00"))
@@ -65,13 +75,14 @@ def reconcile_server(
                 """INSERT INTO active_alerts
                    (source_id, server, backend, host, service, type, state, hard,
                     acknowledged, downtime, last_check, last_change, first_seen_at, last_seen_at,
-                    episode_id, notification_revision, status_information)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    episode_id, notification_revision, status_information, status_information_available)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source_id, alert.server, alert.backend, alert.host, alert.service, alert.type,
                     alert.state, int(alert.hard), int(alert.acknowledged), int(alert.downtime),
                     alert.last_check, alert.last_change, received_at, received_at, episode_id, revision,
-                    alert.status_information or "",
+                    alert.status_information,
+                    int("status_information" in alert.model_fields_set),
                 ),
             )
             db.execute(
@@ -81,7 +92,7 @@ def reconcile_server(
                 (source_id, *key, value, received_at),
             )
             record_transition(
-                db, source_id=source_id, alert=alert.model_dump(), episode_id=episode_id,
+                db, source_id=source_id, alert=_notification_alert(alert), episode_id=episode_id,
                 revision=revision, event_type="opened", old_state=None, occurred_at=received_at,
             )
             continue
@@ -103,7 +114,7 @@ def reconcile_server(
                 (source_id, *key, previous["state"], alert.state, received_at),
             )
             record_transition(
-                db, source_id=source_id, alert=alert.model_dump(), episode_id=previous["episode_id"],
+                db, source_id=source_id, alert=_notification_alert(alert, previous), episode_id=previous["episode_id"],
                 revision=revision, event_type="state_changed", old_state=previous["state"],
                 occurred_at=received_at,
             )
@@ -121,11 +132,13 @@ def reconcile_server(
         db.execute(
             """UPDATE active_alerts SET state = ?, hard = ?, acknowledged = ?, downtime = ?,
                last_check = ?, last_change = ?, last_seen_at = ?, notification_revision = ?,
-               status_information = COALESCE(?, status_information) WHERE id = ?""",
+               status_information = COALESCE(?, status_information),
+               status_information_available = COALESCE(?, status_information_available) WHERE id = ?""",
             (
                 alert.state, int(alert.hard), int(alert.acknowledged), int(alert.downtime),
                 alert.last_check, alert.last_change, received_at, revision,
                 alert.status_information if "status_information" in alert.model_fields_set else None,
+                1 if "status_information" in alert.model_fields_set else None,
                 previous["id"],
             ),
         )
@@ -154,6 +167,8 @@ def reconcile_server(
                 "hard": bool(previous["hard"]), "acknowledged": bool(previous["acknowledged"]),
                 "downtime": bool(previous["downtime"]),
             }
+            if previous["status_information_available"]:
+                recovered_alert["status_information"] = previous["status_information"]
             record_transition(
                 db, source_id=source_id, alert=recovered_alert, episode_id=previous["episode_id"],
                 revision=revision, event_type="recovered", old_state=previous["state"],

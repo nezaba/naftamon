@@ -6,11 +6,12 @@ from typing import Any
 
 RULE_FIELDS = {
     "source", "source_id", "server", "backend", "type", "host", "service",
-    "state", "hard", "acknowledged", "downtime",
+    "state", "status_information", "hard", "acknowledged", "downtime",
 }
 RULE_OPERATORS = {
     "equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "wildcard",
 }
+STATUS_INFORMATION_OPERATORS = {"equals", "not_equals", "contains", "not_contains"}
 EVENT_TYPES = {"opened", "state_changed", "recovered", "reminder"}
 TEMPLATE_FIELDS = {
     "source", "source_id", "server", "backend", "host", "service", "type",
@@ -41,6 +42,8 @@ def validate_conditions(value: Any) -> dict[str, Any]:
             raise RuleValidationError(f"unsupported rule field: {field}")
         if operation not in RULE_OPERATORS:
             raise RuleValidationError(f"unsupported rule operator: {operation}")
+        if field == "status_information" and operation not in STATUS_INFORMATION_OPERATORS:
+            raise RuleValidationError("status_information supports equals, not_equals, contains and not_contains")
         if isinstance(expected, (dict, list)) or expected is None:
             raise RuleValidationError("condition values must be strings or booleans")
         if isinstance(expected, bool):

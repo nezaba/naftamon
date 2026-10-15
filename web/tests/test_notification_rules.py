@@ -10,6 +10,7 @@ CONTEXT = {
     "backend": "prod-checks", "type": "service", "host": "DB-Primary-01",
     "service": "Disk /", "state": "CRITICAL", "hard": True,
     "acknowledged": False, "downtime": False,
+    "status_information": "Connection refused — DISK CRITICAL",
 }
 
 
@@ -28,6 +29,10 @@ CONTEXT = {
     ("state", "equals", "CRITICAL", True),
     ("state", "equals", "WARNING", False),
     ("state", "equals", "UNKNOWN", False),
+    ("status_information", "contains", "connection REFUSED", True),
+    ("status_information", "not_contains", "maintenance", True),
+    ("status_information", "equals", "connection refused — disk critical", True),
+    ("status_information", "not_equals", "connection refused", True),
     ("acknowledged", "equals", False, True),
     ("downtime", "equals", True, False),
     ("hard", "equals", True, True),
@@ -52,6 +57,42 @@ def test_and_or_combinations_and_absent_field():
         {"field": "service", "operator": "not_equals", "value": "disk"},
     ]})
     assert rule_matches(partial, missing) is False
+
+
+@pytest.mark.parametrize("operation", ["contains", "not_contains", "equals", "not_equals"])
+def test_status_information_missing_never_matches_including_negative_operators(operation):
+    context = dict(CONTEXT)
+    context.pop("status_information")
+    conditions = validate_conditions({"operator": "AND", "conditions": [
+        {"field": "status_information", "operator": operation, "value": "maintenance"},
+    ]})
+    assert rule_matches(context, conditions) is False
+
+
+def test_status_information_combines_with_state_host_and_service_using_and_or():
+    and_conditions = validate_conditions({"operator": "AND", "conditions": [
+        {"field": "state", "operator": "equals", "value": "critical"},
+        {"field": "host", "operator": "equals", "value": "db-primary-01"},
+        {"field": "service", "operator": "equals", "value": "disk /"},
+        {"field": "status_information", "operator": "contains", "value": "disk critical"},
+    ]})
+    assert rule_matches(CONTEXT, and_conditions) is True
+    warning = dict(CONTEXT, state="WARNING")
+    assert rule_matches(warning, and_conditions) is False
+
+    or_conditions = validate_conditions({"operator": "OR", "conditions": [
+        {"field": "state", "operator": "equals", "value": "WARNING"},
+        {"field": "status_information", "operator": "contains", "value": "disk critical"},
+    ]})
+    assert rule_matches(CONTEXT, or_conditions) is True
+
+
+@pytest.mark.parametrize("operation", ["starts_with", "ends_with", "wildcard"])
+def test_status_information_rejects_operators_outside_requested_set(operation):
+    with pytest.raises(RuleValidationError):
+        validate_conditions({"operator": "AND", "conditions": [
+            {"field": "status_information", "operator": operation, "value": "disk*"},
+        ]})
 
 
 def test_plugin_output_is_not_a_rule_field():

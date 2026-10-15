@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Add future schema changes as transactional SQL statements keyed by version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -229,6 +229,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             UNIQUE (source_id, server, backend, type, host, service)
         )""",
         "CREATE INDEX idx_monitored_statuses_source_server ON monitored_statuses(source_id, server)",
+    ),
+    6: (
+        "ALTER TABLE active_alerts ADD COLUMN status_information_available INTEGER NOT NULL DEFAULT 0 CHECK (status_information_available IN (0, 1))",
+        # Existing non-empty values are known to have been received; empty legacy
+        # values are ambiguous, so leave them unavailable and prevent false matches.
+        "UPDATE active_alerts SET status_information_available = 1 WHERE status_information <> ''",
     ),
 }
 

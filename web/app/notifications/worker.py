@@ -339,6 +339,8 @@ class NotificationWorker:
                         "hard": bool(active["hard"]), "acknowledged": bool(active["acknowledged"]),
                         "downtime": bool(active["downtime"]),
                     }
+                    if active["status_information_available"]:
+                        alert["status_information"] = active["status_information"]
                     context = {
                         "source": active["source_name"], "source_id": active["source_id"], **alert,
                     }

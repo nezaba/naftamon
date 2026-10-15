@@ -452,6 +452,8 @@ def test_rule(rule_id: int):
             "service": alert["service"], "state": alert["state"], "hard": bool(alert["hard"]),
             "acknowledged": bool(alert["acknowledged"]), "downtime": bool(alert["downtime"]),
         }
+        if alert["status_information_available"]:
+            context["status_information"] = alert["status_information"]
         if rule_matches(context, conditions):
             matches.append({key: context[key] for key in ("source_id", "server", "backend", "type", "host", "service", "state")})
     return {"dry_run": True, "sent": False, "total_examined": len(alerts), "match_count": len(matches), "matches": matches}

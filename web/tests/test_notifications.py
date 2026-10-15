@@ -185,6 +185,144 @@ def test_rule_dry_run_crud_and_paginated_api_contract(app_factory, key_file, pub
         assert client.delete(f"/api/v1/notifications/channels/{channel['id']}").status_code == 204
 
 
+def test_status_information_rule_persists_across_restart(app_factory, tmp_path):
+    database_path = tmp_path / "status-information-rule.sqlite3"
+    condition_group = {
+        "operator": "AND",
+        "conditions": [
+            {"field": "status_information", "operator": "not_contains", "value": "maintenance"},
+            {"field": "state", "operator": "equals", "value": "CRITICAL"},
+        ],
+    }
+    with TestClient(app_factory(database_path=database_path)) as client:
+        payload = _rule_payload(0, channel_ids=[], conditions=condition_group)
+        created = client.post("/api/v1/notifications/rules", json=payload)
+        assert created.status_code == 201
+        rule_id = created.json()["id"]
+        assert created.json()["conditions"] == condition_group
+
+    with TestClient(app_factory(database_path=database_path)) as client:
+        rules = client.get("/api/v1/notifications/rules").json()["items"]
+        restored = next(rule for rule in rules if rule["id"] == rule_id)
+        assert restored["conditions"] == condition_group
+
+
+def test_status_information_rule_dry_run_uses_only_available_alert_data(app_factory, key_file, public_dns):
+    app = app_factory()
+    conditions = {"operator": "AND", "conditions": [
+        {"field": "status_information", "operator": "contains", "value": "DISK CRITICAL"},
+    ]}
+    with TestClient(app) as client:
+        channel = client.post("/api/v1/notifications/channels", json=_channel_payload()).json()
+        rule = client.post(
+            "/api/v1/notifications/rules",
+            json=_rule_payload(channel["id"], conditions=conditions),
+        ).json()
+        with_info = _alert("CRITICAL") | {"status_information": "disk critical: 90% used"}
+        legacy = _alert("CRITICAL") | {"host": "db02"}
+        legacy.pop("status_information", None)
+        assert client.post("/api/v1/ingest", json=_snapshot([with_info, legacy])).status_code == 202
+        result = client.post(f"/api/v1/notifications/rules/{rule['id']}/test")
+        assert result.status_code == 200
+        assert result.json()["match_count"] == 1
+        assert result.json()["sent"] is False
+
+
+def test_status_information_notifications_are_per_alert_and_ignore_ok_statuses(
+    app_factory, key_file, public_dns,
+):
+    app = app_factory()
+    conditions = {
+        "operator": "AND",
+        "conditions": [
+            {"field": "state", "operator": "equals", "value": "CRITICAL"},
+            {"field": "host", "operator": "equals", "value": "db01"},
+            {"field": "service", "operator": "equals", "value": "disk"},
+            {"field": "status_information", "operator": "contains", "value": "connection refused"},
+        ],
+    }
+    matching = _alert("CRITICAL") | {"status_information": "Connection refused by peer"}
+    wrong_host = _alert("CRITICAL") | {
+        "host": "db02", "status_information": "Connection refused by peer",
+    }
+    wrong_state = _alert("WARNING") | {
+        "host": "db03", "status_information": "Connection refused by peer",
+    }
+    wrong_text = _alert("CRITICAL") | {
+        "host": "db04", "status_information": "All checks passed",
+    }
+    legacy = _alert("CRITICAL") | {"host": "db05"}
+    legacy.pop("status_information", None)
+    ok_status = {
+        "server": "Thruk oficina", "backend": "alpha", "host": "db01", "service": "",
+        "type": "host", "state": "UP", "hard": True, "acknowledged": False, "downtime": False,
+        "last_check": "2026-10-14T21:59:00Z", "last_change": "2026-10-14T21:30:00Z",
+        "status_information": "Connection refused should not notify from UP statuses",
+    }
+
+    with TestClient(app) as client:
+        channel = client.post("/api/v1/notifications/channels", json=_channel_payload()).json()
+        rule_payload = _rule_payload(channel["id"], conditions=conditions)
+        rule = client.post("/api/v1/notifications/rules", json=rule_payload)
+        assert rule.status_code == 201
+        assert client.put(
+            "/api/v1/notifications/settings",
+            json={"enabled": True, "history_retention_days": 90},
+        ).status_code == 200
+
+        snapshot = _snapshot([matching, wrong_host, wrong_state, wrong_text, legacy])
+        snapshot["ok_statuses"] = [ok_status]
+        assert client.post("/api/v1/ingest", json=snapshot).status_code == 202
+
+    with connect(app.state.settings.database_path) as db:
+        rows = db.execute(
+            "SELECT host, status_information_available FROM active_alerts ORDER BY host",
+        ).fetchall()
+        availability = {row["host"]: row["status_information_available"] for row in rows}
+        assert availability["db01"] == 1
+        assert availability["db02"] == 1
+        assert availability["db05"] == 0
+        assert db.execute("SELECT COUNT(*) FROM notification_events WHERE event_type='opened'").fetchone()[0] == 5
+        deliveries = db.execute(
+            "SELECT e.payload_json FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id",
+        ).fetchall()
+        assert len(deliveries) == 1
+        context = json.loads(deliveries[0]["payload_json"])
+        assert context["host"] == "db01"
+        assert context["status_information"] == "Connection refused by peer"
+        # UP host/service records are persisted as monitoring state only.
+        assert db.execute("SELECT COUNT(*) FROM monitored_statuses").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM notification_events WHERE state='UP'").fetchone()[0] == 0
+
+
+def test_recovery_rule_matches_last_known_status_information(app_factory, key_file, public_dns):
+    app = app_factory()
+    conditions = {"operator": "AND", "conditions": [
+        {"field": "status_information", "operator": "contains", "value": "timeout"},
+    ]}
+    with TestClient(app) as client:
+        channel = client.post("/api/v1/notifications/channels", json=_channel_payload()).json()
+        payload = _rule_payload(
+            channel["id"], conditions=conditions, events=["recovered"],
+        )
+        assert client.post("/api/v1/notifications/rules", json=payload).status_code == 201
+        assert client.put(
+            "/api/v1/notifications/settings",
+            json={"enabled": True, "history_retention_days": 90},
+        ).status_code == 200
+        alert = _alert("CRITICAL") | {"status_information": "Network connection timeout"}
+        assert client.post("/api/v1/ingest", json=_snapshot([alert])).status_code == 202
+        assert client.post("/api/v1/ingest", json=_snapshot([])).status_code == 202
+
+    with connect(app.state.settings.database_path) as db:
+        deliveries = db.execute(
+            "SELECT e.event_type, e.payload_json FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id",
+        ).fetchall()
+        assert len(deliveries) == 1
+        assert deliveries[0]["event_type"] == "recovered"
+        assert json.loads(deliveries[0]["payload_json"])["status_information"] == "Network connection timeout"
+
+
 def test_ingest_transaction_outbox_retries_partial_and_recovery(app_factory, key_file, public_dns):
     app = app_factory()
     sent = []
@@ -486,8 +624,11 @@ def test_v3_migration_preserves_alert_without_backfilling_notification_events(tm
 
     initialize(path)
     with connect(path) as migrated:
-        alert = migrated.execute("SELECT episode_id, notification_revision FROM active_alerts").fetchone()
-        assert tuple(alert) == ("legacy-1", 0)
+        alert = migrated.execute(
+            "SELECT episode_id, notification_revision, status_information_available FROM active_alerts",
+        ).fetchone()
+        assert (alert["episode_id"], alert["notification_revision"]) == ("legacy-1", 0)
+        assert alert["status_information_available"] == 0
         assert migrated.execute("SELECT enabled FROM notification_settings WHERE id=1").fetchone()[0] == 0
         assert migrated.execute("SELECT COUNT(*) FROM notification_events").fetchone()[0] == 0
 
