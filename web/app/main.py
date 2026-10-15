@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
@@ -125,13 +126,15 @@ def create_app(
         history_retention_days=history_retention_days if history_retention_days is not None else base.history_retention_days,
     )
     initialize(app_settings.database_path)
-    app = FastAPI(title="NaftaMon Web API", version="1.0", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="NaftaMon Web", version="1.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = app_settings
     app.add_middleware(RequestSizeLimitMiddleware, max_bytes=app_settings.max_request_bytes)
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-    @app.get("/", response_class=PlainTextResponse)
+    @app.get("/")
     def root():
-        return "NaftaMon Web backend is running. API: /api/v1; health: /healthz."
+        return FileResponse(static_dir / "index.html", media_type="text/html")
 
     @app.post(INGEST_PATH, status_code=202)
     async def ingest(request: Request):

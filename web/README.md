@@ -1,13 +1,23 @@
-# NaftaMon Web — backend (Etapa 2)
+# NaftaMon Web — dashboard y backend
 
-Servicio local para recibir snapshots del Webhook Gateway de NaftaMon Desktop y consultar el estado guardado. Esta etapa implementa API y persistencia; el dashboard visual se desarrolla aparte.
+Dashboard local para ver alertas activas recibidas desde NaftaMon Desktop. Incluye una interfaz responsive en español, APIs de lectura y recepción de snapshots con persistencia SQLite.
 
 ## Requisitos
 
 - Docker Desktop con Compose v2.
 - Para recibir datos desde otra computadora: ambos equipos en una LAN de confianza y la IP LAN privada del equipo que corre Docker.
 
-El backend no usa login, API keys, tokens, CORS como control de acceso ni servicios externos. Las APIs son accesibles sin autenticación desde quien alcance el puerto. No lo expongas a Internet.
+La página principal en `http://127.0.0.1:8080/` abre directamente el dashboard, sin login. No usa cuentas, sesiones, API keys, tokens, CDN ni recursos remotos. El dashboard y las APIs son accesibles sin autenticación desde cualquier cliente que alcance el puerto. No lo expongas a Internet.
+
+## Dashboard
+
+La vista principal muestra el total de alertas, CRITICAL, WARNING, UNKNOWN y hosts DOWN/UNREACHABLE; cuenta fuentes online/offline por su última recepción y muestra separadamente errores o estados pendientes de servidores Thruk. Una consulta vacía solo se presenta como saludable cuando las fuentes están online y los snapshots son completos y exitosos. Si falta información, la interfaz advierte que la ausencia de alertas no confirma salud.
+
+La tabla presenta únicamente campos que envía el Gateway o que el receptor observa: fuente provisional (nombre e IP peer), servidor, backend, host, servicio, estado, confirmación del dato, acknowledgement, downtime y última recepción. El contrato no envía plugin output ni descripción; por eso no se muestran. Los filtros combinables cubren host, servicio, texto, severidad, servidor, backend, fuente, acknowledgement y downtime. Los encabezados permiten ordenar y la tabla pagina localmente los resultados.
+
+El dashboard consulta APIs del mismo origen mediante polling HTTP. El intervalo inicial es 5 segundos y se puede cambiar a 10, 15, 30 o 60 segundos desde la barra superior; esa preferencia se conserva en el navegador. El dashboard recorre las páginas de alertas del backend en lotes de hasta 500, sin truncar la lista por el límite de una página. Los filtros, el orden y la página actual se mantienen durante cada actualización. El selector de tema claro/oscuro también se guarda localmente.
+
+La pestaña **Historial de cambios** muestra aperturas, cambios de estado/atributos y recuperaciones que el backend observó en snapshots. No puede mostrar cambios transitorios que ocurrieron entre dos recepciones. La sección **Fuentes de información** muestra la antigüedad de cada webhook y el estado de cada servidor Thruk por separado. Los mensajes manuales `type: test` no crean fuentes.
 
 ## Ejecutar
 
@@ -81,6 +91,7 @@ Todas las rutas son mismo origen, no requieren autenticación y devuelven JSON:
 
 | Método y ruta | Uso |
 | --- | --- |
+| `GET /` | Dashboard visual, sin autenticación. |
 | `GET /api/v1/alerts` | Alertas activas con `source_id`, `server`, `state`, `type`, `stale`, `limit` y `offset` opcionales. |
 | `GET /api/v1/stats` | Total de alertas, agrupación por estado y fuentes online/offline. |
 | `GET /api/v1/sources` | Última recepción, frescura y estado de consultas por servidor. |
@@ -103,7 +114,7 @@ Invoke-RestMethod http://127.0.0.1:8080/api/v1/sources
 docker compose restart web
 ```
 
-Para inspeccionar una recepción, consulta `/api/v1/alerts`, `/api/v1/sources` y `/api/v1/history`; los logs del contenedor muestran el estado HTTP, no registran el cuerpo del webhook. El reinicio del contenedor conserva el volumen `naftamon_web_data`.
+Para inspeccionar una recepción, usa el dashboard o consulta `/api/v1/alerts`, `/api/v1/sources` y `/api/v1/history`; los logs del contenedor muestran el estado HTTP, no registran el cuerpo del webhook. El reinicio del contenedor conserva el volumen `naftamon_web_data`.
 
 La suite de pytest cubre persistencia al recrear la aplicación sobre el mismo archivo SQLite. Para probar además un reinicio real del contenedor en Windows PowerShell, ejecuta desde `web/`:
 

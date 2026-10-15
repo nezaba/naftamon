@@ -21,4 +21,6 @@ Skills locales:
 - Docker: ../.agents/skills/naftamon-web-docker/SKILL.md
 - Pruebas: ../.agents/skills/naftamon-web-testing/SKILL.md
 
-La etapa 2 implementa receptor, API de lectura y persistencia en SQLite. No iniciar todavía el dashboard visual completo salvo que se solicite explícitamente.
+El proyecto incluye receptor, API de lectura, persistencia SQLite y dashboard local en HTML/CSS/JavaScript servido desde FastAPI. Mantener el dashboard sin recursos externos y sin autenticación. El dashboard debe consumir solo APIs del mismo origen y distinguir frescura de fuente de estado de consulta por servidor.
+
+Al cambiar UI, verificar `/`, `/static/dashboard.css` y `/static/dashboard.js` mediante pruebas web. Para comprobaciones integrales usa `docker compose` de este directorio y fixtures inventados; nunca uses la red de producción. Inspecciona la UI con navegador cuando esté disponible y registra las comprobaciones que no puedan ejecutarse.

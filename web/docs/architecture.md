@@ -2,17 +2,15 @@
 
 ## Estado
 
-La etapa 1 definió esta arquitectura. La etapa 2 ya implementa receptor, API, persistencia SQLite y Compose; el dashboard visual completo sigue pendiente. NaftaMon Desktop no se modificó. El contrato real del receptor está en [webhook-contract.md](webhook-contract.md).
+La etapa 1 definió esta arquitectura. La etapa 2 implementó receptor, API, persistencia SQLite y Compose. La etapa 3 sirve un dashboard local desde FastAPI; NaftaMon Desktop no se modificó. El contrato real del receptor está en [webhook-contract.md](webhook-contract.md).
 
 ## Arquitectura
 
-El objetivo es una aplicación monolítica FastAPI servida por un contenedor Docker Compose. La etapa 2 implementa el receptor y las APIs JSON; la interfaz visual se añadirá después con HTML, CSS y JavaScript locales. SQLite vive en un volumen persistente. No hacen falta React, Redis, PostgreSQL, Kubernetes, CDN ni servicios externos.
+La aplicación es monolítica FastAPI servida por un contenedor Docker Compose. El mismo proceso sirve la UI, las APIs JSON y el receptor HTTP. HTML, CSS y JavaScript nativos se mantienen bajo `app/static` y se sirven desde el mismo origen. SQLite vive en un volumen persistente. No hacen falta React, Redis, PostgreSQL, Kubernetes, CDN ni servicios externos.
 
 El mismo proceso sirve dashboard, APIs de lectura y el receptor HTTP. CSS y JavaScript se incluyen localmente. No se publica SQLite como servicio de red. Para el tráfico esperado, usar Uvicorn con un worker, imagen Python pequeña, usuario no privilegiado y healthcheck HTTP.
 
-## Estructura actual y futura
-
-Backend y pruebas actuales más las ubicaciones previstas para el futuro dashboard:
+## Estructura actual
 
 ~~~
 web/
@@ -30,9 +28,14 @@ web/
     settings.py
     db.py
     ingest.py
+    static/
+      index.html
+      dashboard.css
+      dashboard.js
   tests/
     conftest.py
     test_backend.py
+    test_dashboard.py
     test-container-persistence.ps1
   docs/
     architecture.md
@@ -85,13 +88,17 @@ No hay autenticación en dashboard, receptor ni APIs. Las rutas usan mismo orige
 
 | Método y ruta | Función |
 | --- | --- |
-| GET / | Mensaje de estado básico; el dashboard visual está pendiente. |
+| GET / | Dashboard visual servido directamente, sin autenticación. |
 | POST /api/v1/ingest | Recibir test o snapshot. Sin autenticación; agrupación provisional por source + peer IP observada. |
 | GET /api/v1/stats | Totales de alertas, agrupación por estado y fuentes online/offline. |
 | GET /api/v1/sources | Fuentes, última recepción y estado de sus servidores. |
 | GET /api/v1/alerts | Alertas actuales; filtros opcionales por source_id, server, state, type y stale, más paginación. |
 | GET /api/v1/history | Transiciones observadas; filtros por source_id/server y límite de paginación. |
 | GET /healthz | Salud del proceso y SQLite, sin datos sensibles. |
+
+La UI local se sirve desde `/static/dashboard.css` y `/static/dashboard.js`. Consulta `/healthz`, `/api/v1/alerts` (en lotes paginados de hasta 500), `/api/v1/sources` y, cuando se abre la pestaña de historial, `/api/v1/history`. El intervalo inicial es 5 s y puede configurarse entre 5 y 60 s; el navegador conserva la selección. La tabla muestra 50 alertas por página y filtra/ordena el conjunto completo en cliente. El historial se consulta en páginas de 50 registros.
+
+Las estadísticas de severidad se calculan con las alertas recuperadas de la API paginada y la disponibilidad del emisor se deriva de `last_received_at`/`age_seconds` en `/api/v1/sources`. Así se evitan diferencias temporales entre conteos de solicitudes separadas a `/api/v1/stats`. Una condición sin alertas solo se presenta como saludable si cada fuente está dentro del umbral y su snapshot es completo con servidores `ok`. Estados parciales, fallidos, stale u offline se indican por separado. El Gateway no envía plugin output ni descripciones; el dashboard los omite.
 
 Respuestas de POST sugeridas: 202 tras aceptar y persistir; 400 JSON/estructura inválida; 413 cuerpo demasiado grande; 415 tipo de contenido no soportado. Límite inicial sugerido: 8 MiB configurable.
 
