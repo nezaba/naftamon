@@ -1,6 +1,7 @@
 #pragma once
 #include "core.h"
 #include "thruk.h"
+#include "webhookgateway.h"
 #include <QAbstractTableModel>
 #include <QSortFilterProxyModel>
 #include <QSystemTrayIcon>
@@ -30,6 +31,9 @@ enum CloseAction { CloseAsk = 0, CloseMinimize = 1, CloseQuit = 2 };
 struct AppConfig {
     QVector<ServerConf> servers;
     int intervalSec = 10;  // Nagstamon default is 60
+    bool webhookEnabled = false;
+    QString webhookUrl;
+    int webhookIntervalSeconds = 60;
     bool floatingBar = true;
     Filters filters;
     bool notify = true, flash = true, sound = true, soundRepeat = false, desktop = false;
@@ -141,9 +145,11 @@ private:
     AppConfig cfg;
     QVector<ThrukServer *> servers;
     QTimer pollTimer, tickTimer;
+    WebhookGateway gateway;
     StatusModel model;
     ItemProxy *proxy;
     QToolButton *hideAck, *hideDowntime, *hideFlapping, *hideNew;  // quick filters next to search
+    QToolButton *gatewayToggle;
     QToolButton *updateBtn, *bannerUpdate;  // bannerUpdate: "Update" button of the new-version notice
     QString latestCommit;
     QNetworkAccessManager updateNam;
@@ -151,6 +157,7 @@ private:
     QWidget *window;
     QTableView *view;
     QLabel *serverLine;
+    QLabel *gatewayLine;
     QLineEdit *search;
     QLabel *emptyHint, *emptyLogo, *bannerText;
     QFrame *banner;
@@ -167,6 +174,8 @@ private:
     qint64 seenSince = QDateTime::currentSecsSinceEpoch();  // state changes after this are "new"
 
     void applyConfig();
+    void updateGatewayUi();
+    void gatewayDialog();
     // quiet: re-filter without notifying or marking newly visible rows as new (filter changes)
     void rebuild(ThrukServer *updated, bool quiet = false);
     void syncToggles();

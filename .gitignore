@@ -5,6 +5,11 @@ build/
 # clangd config with machine-specific Qt include paths
 compile_flags.txt
 .cache/
+web/.env
+web/.local/
+web/.test-local/
+web/.env.notifications-test
+web/data/
 # local AI assistant instructions/settings
 CLAUDE.md
 .claude/

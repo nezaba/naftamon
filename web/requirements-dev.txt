@@ -1,0 +1,9 @@
+-r requirements.txt
+httpx==0.28.1
+httpcore==1.0.7
+certifi==2025.1.31
+pytest==8.3.5
+iniconfig==2.1.0
+packaging==24.2
+pluggy==1.5.0
+pygments==2.19.1

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#101821">
+  <title>NaftaMon Web — Monitoreo</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+  <script src="/static/notifications.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Saltar al contenido</a>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="NaftaMon Web, inicio">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand-copy"><strong>NaftaMon</strong><small>WEB MONITOR</small></span>
+    </a>
+    <div class="topbar-tools">
+      <div class="poll-control">
+        <label for="poll-interval">Actualizar</label>
+        <select id="poll-interval" aria-label="Intervalo de actualización">
+          <option value="5000">5 s</option><option value="10000">10 s</option>
+          <option value="15000">15 s</option><option value="30000">30 s</option>
+          <option value="60000">60 s</option>
+        </select>
+      </div>
+      <button class="icon-button" id="refresh-now" type="button" title="Actualizar ahora" aria-label="Actualizar ahora">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.7 9A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12.3-3"/></svg>
+      </button>
+      <button class="theme-button" id="theme-toggle" type="button" aria-label="Cambiar a tema claro">
+        <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
+        <span id="theme-label">Tema claro</span>
+      </button>
+    </div>
+  </header>
+
+  <nav class="app-navigation" aria-label="Navegación principal">
+    <div class="app-navigation-inner">
+      <div class="primary-links">
+        <a class="app-nav-link is-active" id="nav-monitor" href="#monitor">Monitor</a>
+        <a class="app-nav-link" id="nav-notifications" href="#notifications/rules">Notifications</a>
+      </div>
+      <div class="notification-links" id="notification-links" aria-label="Secciones de notificaciones" hidden>
+        <a class="notification-nav-link is-active" data-notification-view="rules" href="#notifications/rules">Rules</a>
+        <a class="notification-nav-link" data-notification-view="channels" href="#notifications/channels">Channels</a>
+        <a class="notification-nav-link" data-notification-view="history" href="#notifications/history">History</a>
+        <a class="notification-nav-link" data-notification-view="settings" href="#notifications/settings">Settings</a>
+      </div>
+    </div>
+  </nav>
+
+  <main id="main-content" class="page-shell">
+  <div id="monitor-content">
+    <section class="page-heading" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow">CENTRO DE OPERACIONES</p>
+        <h1 id="page-title">Estado de infraestructura</h1>
+        <p class="page-subtitle">Alertas activas recibidas desde NaftaMon Desktop</p>
+      </div>
+      <div class="connection-state" id="connection-state" data-state="loading" role="status" aria-live="polite">
+        <span class="connection-dot" aria-hidden="true"></span><span id="connection-label">Conectando con el backend</span>
+      </div>
+    </section>
+
+    <div id="backend-banner" class="banner banner-error" role="alert" hidden>
+      <span class="banner-symbol" aria-hidden="true">!</span>
+      <div><strong>Backend no disponible</strong><p id="backend-error-text">No se pudieron consultar los datos.</p></div>
+      <button class="banner-action" id="retry-now" type="button">Reintentar</button>
+    </div>
+    <div id="data-warning" class="banner banner-warning" role="status" aria-live="polite" hidden>
+      <span class="banner-symbol" aria-hidden="true">!</span><div><strong>Datos incompletos o desactualizados</strong><p id="data-warning-text"></p></div>
+    </div>
+    <div id="first-data" class="empty-onboarding" hidden>
+      <span class="onboarding-mark" aria-hidden="true">⌁</span>
+      <div><strong>Esperando el primer snapshot</strong><p>El backend responde, pero todavía no recibió información de una fuente. Cuando NaftaMon Desktop envíe su primer webhook, aparecerá aquí.</p></div>
+    </div>
+
+    <section class="metrics-grid" aria-label="Resumen de monitoreo">
+      <article class="metric-card metric-total"><div class="metric-top"><span>Alertas activas</span><span class="metric-glyph" aria-hidden="true">≡</span></div><strong class="metric-value" id="metric-total">—</strong><span class="metric-note" id="metric-stale-note">En todos los servidores</span></article>
+      <article class="metric-card metric-critical"><div class="metric-top"><span>Critical</span><span class="severity-dot" aria-hidden="true"></span></div><strong class="metric-value" id="metric-critical">—</strong><span class="metric-note">Servicios y hosts</span></article>
+      <article class="metric-card metric-warning"><div class="metric-top"><span>Warning</span><span class="severity-dot" aria-hidden="true"></span></div><strong class="metric-value" id="metric-warning">—</strong><span class="metric-note">Servicios y hosts</span></article>
+      <article class="metric-card metric-unknown"><div class="metric-top"><span>Unknown</span><span class="severity-dot" aria-hidden="true"></span></div><strong class="metric-value" id="metric-unknown">—</strong><span class="metric-note">Servicios y hosts</span></article>
+      <article class="metric-card metric-host"><div class="metric-top"><span>Hosts afectados</span><span class="metric-glyph" aria-hidden="true">⌂</span></div><strong class="metric-value" id="metric-hosts">—</strong><span class="metric-note" id="metric-host-detail">Down 0 · Unreachable 0</span></article>
+      <article class="metric-card metric-source"><div class="metric-top"><span>Fuentes online</span><span class="metric-glyph" aria-hidden="true">⌁</span></div><strong class="metric-value" id="metric-sources">—</strong><span class="metric-note" id="metric-source-detail">0 offline</span></article>
+    </section>
+
+    <div class="receipt-strip">
+      <span class="receipt-icon" aria-hidden="true">◷</span>
+      <span>Última recepción</span><strong id="last-received">—</strong>
+      <span class="strip-separator" aria-hidden="true"></span><span id="last-received-age">Esperando datos</span>
+      <span class="strip-spacer"></span><span class="poll-indicator"><i aria-hidden="true"></i> Polling activo</span>
+    </div>
+
+    <nav class="view-tabs" aria-label="Vistas del dashboard" role="tablist">
+      <button type="button" class="view-tab is-active" id="tab-alerts" role="tab" aria-selected="true" aria-controls="alerts-view">Alertas actuales <span class="tab-count" id="tab-alert-count">0</span></button>
+      <button type="button" class="view-tab" id="tab-history" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">Historial de cambios</button>
+    </nav>
+
+    <section class="view-panel" id="alerts-view" role="tabpanel" aria-labelledby="tab-alerts">
+      <div class="section-heading">
+        <div><h2>Alertas actuales</h2><p class="section-subtitle">Estado más reciente conocido por cada servidor</p></div>
+        <div class="section-meta"><span class="live-dot" aria-hidden="true"></span><span id="alert-count-label">0 alertas</span></div>
+      </div>
+
+      <form id="filters" class="filters" autocomplete="off">
+        <label class="search-field search-host"><span>Host</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-host" type="search" placeholder="Buscar host…" aria-label="Buscar por host"></span></label>
+        <label class="search-field search-service"><span>Servicio</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-service" type="search" placeholder="Buscar servicio…" aria-label="Buscar por servicio"></span></label>
+        <label class="search-field search-text"><span>Texto</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-text" type="search" placeholder="Servidor, backend…" aria-label="Buscar en los datos de la alerta"></span></label>
+        <label class="select-field"><span>Severidad</span><select id="filter-severity"><option value="">Todas</option><option>CRITICAL</option><option>WARNING</option><option>UNKNOWN</option><option>DOWN</option><option>UNREACHABLE</option></select></label>
+        <label class="select-field"><span>Servidor</span><select id="filter-server"><option value="">Todos</option></select></label>
+        <label class="select-field"><span>Backend</span><select id="filter-backend"><option value="">Todos</option></select></label>
+        <label class="select-field"><span>Fuente</span><select id="filter-source"><option value="">Todas</option></select></label>
+        <label class="select-field"><span>Acknowledgement</span><select id="filter-ack"><option value="">Todos</option><option value="true">Acknowledged</option><option value="false">Sin acknowledgement</option></select></label>
+        <label class="select-field"><span>Downtime</span><select id="filter-downtime"><option value="">Todos</option><option value="true">En downtime</option><option value="false">Sin downtime</option></select></label>
+        <button class="clear-filters" id="clear-filters" type="button">Limpiar filtros</button>
+      </form>
+
+      <div class="table-toolbar"><span id="filtered-count">Mostrando 0 alertas</span><span class="table-hint">Selecciona un encabezado para ordenar</span></div>
+      <div class="table-scroll" tabindex="0" aria-label="Tabla de alertas, desplazamiento horizontal disponible">
+        <table class="alerts-table">
+          <thead><tr>
+            <th scope="col"><button data-sort="source" type="button" aria-label="Ordenar por fuente">Fuente <span class="sort-mark"></span></button></th>
+            <th scope="col"><button data-sort="server" type="button">Servidor <span class="sort-mark"></span></button></th>
+            <th scope="col"><button data-sort="backend" type="button">Backend <span class="sort-mark"></span></button></th>
+            <th scope="col"><button data-sort="host" type="button">Host <span class="sort-mark"></span></button></th>
+            <th scope="col"><button data-sort="service" type="button">Servicio <span class="sort-mark"></span></button></th>
+            <th scope="col"><button data-sort="state" type="button" aria-sort="ascending">Estado <span class="sort-mark">↑</span></button></th>
+            <th scope="col">Confirmación</th><th scope="col">Acknowledgement</th><th scope="col">Downtime</th>
+            <th scope="col"><button data-sort="last_seen_at" type="button">Última recepción <span class="sort-mark"></span></button></th>
+          </tr></thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+        <div class="table-empty" id="table-empty" hidden><span class="empty-icon" aria-hidden="true">⌕</span><strong id="table-empty-title"></strong><p id="table-empty-text"></p></div>
+      </div>
+      <div class="pagination" id="pagination" hidden><span id="page-summary"></span><div><button id="page-prev" type="button" aria-label="Página anterior">← Anterior</button><button id="page-next" type="button" aria-label="Página siguiente">Siguiente →</button></div></div>
+    </section>
+
+    <section class="view-panel" id="history-view" role="tabpanel" aria-labelledby="tab-history" hidden>
+      <div class="section-heading"><div><h2>Historial de cambios</h2><p class="section-subtitle">Transiciones observadas en snapshots; no representa eventos omitidos entre recepciones</p></div><span id="history-total" class="section-meta">—</span></div>
+      <div class="history-filters">
+        <label class="select-field"><span>Fuente</span><select id="history-source"><option value="">Todas</option></select></label>
+        <label class="select-field"><span>Servidor</span><select id="history-server"><option value="">Todos</option></select></label>
+      </div>
+      <div class="table-scroll" tabindex="0" aria-label="Historial de cambios, desplazamiento horizontal disponible">
+        <table class="history-table"><thead><tr><th scope="col">Fecha observada</th><th scope="col">Fuente</th><th scope="col">Servidor</th><th scope="col">Host / servicio</th><th scope="col">Evento</th><th scope="col">Cambio observado</th></tr></thead><tbody id="history-body"></tbody></table>
+        <div class="table-empty" id="history-empty" hidden><span class="empty-icon" aria-hidden="true">◷</span><strong id="history-empty-title"></strong><p id="history-empty-text"></p></div>
+      </div>
+      <div class="pagination" id="history-pagination" hidden><span id="history-page-summary"></span><div><button id="history-prev" type="button">← Anterior</button><button id="history-next" type="button">Siguiente →</button></div></div>
+    </section>
+
+    <section class="sources-section" aria-labelledby="sources-title">
+      <div class="section-heading"><div><h2 id="sources-title">Fuentes de información</h2><p class="section-subtitle">Conectividad del emisor y estado de cada servidor Thruk</p></div><span id="source-count-label" class="section-meta">0 fuentes</span></div>
+      <div class="sources-grid" id="sources-grid"></div>
+      <div class="sources-empty" id="sources-empty" hidden>Sin fuentes registradas. Los mensajes de prueba no crean fuentes.</div>
+    </section>
+    <footer class="page-footer"><span>NaftaMon Web</span><span>Sin autenticación · Uso en LAN de confianza</span><span id="footer-update">Aún sin actualizar</span></footer>
+  </div>
+
+  <div id="notifications-content" class="notifications-app" hidden>
+    <section class="notifications-heading" aria-labelledby="notifications-title">
+      <div><p class="eyebrow">AUTOMATIZACIÓN Y AVISOS</p><h1 id="notifications-title">Notifications</h1><p class="page-subtitle">Administra reglas, destinos e historial de entregas.</p></div>
+      <div class="engine-status" id="notification-engine-status" data-enabled="false"><span class="connection-dot" aria-hidden="true"></span><span id="notification-engine-label">Motor deshabilitado</span></div>
+    </section>
+
+    <div id="notification-error" class="banner banner-error" role="alert" hidden><span class="banner-symbol" aria-hidden="true">!</span><div><strong>No se pudo completar la operación</strong><p id="notification-error-text"></p></div><div class="banner-actions"><button class="banner-action" id="notification-retry" type="button">Reintentar</button><button class="banner-action" id="notification-error-close" type="button" aria-label="Cerrar aviso">Cerrar</button></div></div>
+    <div id="notification-notice" class="notification-notice" role="status" aria-live="polite" hidden></div>
+    <div id="notification-loading" class="notification-loading" role="status" aria-live="polite" hidden><span class="connection-dot" aria-hidden="true"></span> Cargando configuración de notificaciones…</div>
+
+    <section class="notification-view" id="notification-rules-view" data-notification-panel="rules">
+      <div class="section-heading notification-section-heading"><div><h2>Rules</h2><p class="section-subtitle">Evalúa transiciones observadas de alertas y selecciona canales de entrega.</p></div><button class="primary-action" id="create-rule" type="button"><span aria-hidden="true">＋</span> Nueva regla</button></div>
+      <div class="notification-info-strip"><span class="info-mark" aria-hidden="true">i</span><span>Las reglas nuevas quedan deshabilitadas. El motor global también debe estar habilitado en Settings para crear entregas.</span><span id="rules-total" class="section-meta">0 reglas</span></div>
+      <div class="notification-list" id="rules-list" aria-live="polite"></div>
+      <div class="notification-empty" id="rules-empty" hidden><span class="empty-icon" aria-hidden="true">◇</span><strong>Todavía no hay reglas</strong><p>Crea una regla para seleccionar transiciones y canales de notificación.</p><button class="secondary-action" id="empty-create-rule" type="button">Crear primera regla</button></div>
+      <div class="notification-pagination" id="rules-pagination" hidden><span id="rules-page-label"></span><div><button type="button" id="rules-prev">← Anterior</button><button type="button" id="rules-next">Siguiente →</button></div></div>
+    </section>
+
+    <section class="notification-view" id="notification-channels-view" data-notification-panel="channels" hidden>
+      <div class="section-heading notification-section-heading"><div><h2>Channels</h2><p class="section-subtitle">Destinos Telegram, Gotify, ntfy y webhook HTTP configurados en este servidor.</p></div><button class="primary-action" id="create-channel" type="button"><span aria-hidden="true">＋</span> Nuevo canal</button></div>
+      <div class="notification-info-strip"><span class="info-mark" aria-hidden="true">i</span><span>Los secretos se cifran en el servidor y nunca se vuelven a mostrar. Las pruebas envían un mensaje real solo al pulsar Test.</span><span id="channels-total" class="section-meta">0 canales</span></div>
+      <div class="notification-list channels-grid" id="channels-list" aria-live="polite"></div>
+      <div class="notification-empty" id="channels-empty" hidden><span class="empty-icon" aria-hidden="true">⌁</span><strong>Todavía no hay canales</strong><p>Configura un destino. Manténlo deshabilitado hasta probarlo y asociarlo a una regla.</p><button class="secondary-action" id="empty-create-channel" type="button">Crear primer canal</button></div>
+      <div class="notification-pagination" id="channels-pagination" hidden><span id="channels-page-label"></span><div><button type="button" id="channels-prev">← Anterior</button><button type="button" id="channels-next">Siguiente →</button></div></div>
+    </section>
+
+    <section class="notification-view" id="notification-history-view" data-notification-panel="history" hidden>
+      <div class="section-heading"><div><h2>Delivery history</h2><p class="section-subtitle">Intentos asociados a eventos reales; no incluye secretos ni cuerpos de proveedor.</p></div><button class="secondary-action" id="refresh-notification-history" type="button">Actualizar</button></div>
+      <form id="notification-history-filters" class="notification-filters">
+        <label class="select-field"><span>Regla</span><select id="history-rule-filter"><option value="">Todas</option></select></label>
+        <label class="select-field"><span>Canal</span><select id="history-channel-filter"><option value="">Todos</option></select></label>
+        <label class="select-field"><span>Resultado</span><select id="history-result-filter"><option value="">Todos</option><option value="pending">Pendiente</option><option value="in_flight">En curso</option><option value="sent">Enviado</option><option value="failed">Fallido</option><option value="cancelled">Cancelado</option></select></label>
+        <label class="select-field"><span>Desde</span><input id="history-from-filter" type="date"></label>
+        <label class="select-field"><span>Hasta</span><input id="history-to-filter" type="date"></label>
+        <button class="clear-filters" id="clear-notification-history-filters" type="button">Limpiar</button>
+      </form>
+      <div class="table-toolbar"><span id="notification-history-count">0 entregas</span><span class="table-hint">La hora corresponde al evento observado por NaftaMon Web.</span></div>
+      <div class="table-scroll notification-table-scroll" tabindex="0" aria-label="Historial de notificaciones, desplazamiento horizontal disponible">
+        <table class="notification-history-table"><thead><tr><th scope="col">Evento</th><th scope="col">Regla</th><th scope="col">Host / servicio</th><th scope="col">Estado</th><th scope="col">Canal</th><th scope="col">Resultado</th><th scope="col">Intentos</th><th scope="col">Último intento</th><th scope="col">Error</th></tr></thead><tbody id="notification-history-body"></tbody></table>
+        <div class="table-empty" id="notification-history-empty" hidden><span class="empty-icon" aria-hidden="true">◷</span><strong id="notification-history-empty-title">Sin entregas registradas</strong><p id="notification-history-empty-text">Cuando una transición coincida con una regla habilitada, el resultado aparecerá aquí.</p></div>
+      </div>
+      <div class="notification-pagination" id="notification-history-pagination" hidden><span id="notification-history-page-label"></span><div><button type="button" id="notification-history-prev">← Anterior</button><button type="button" id="notification-history-next">Siguiente →</button></div></div>
+    </section>
+
+    <section class="notification-view" id="notification-settings-view" data-notification-panel="settings" hidden>
+      <div class="section-heading"><div><h2>Settings</h2><p class="section-subtitle">Control global del worker y retención del historial de entregas.</p></div></div>
+      <form id="notification-settings-form" class="settings-card">
+        <div class="setting-row"><div><strong>Motor de notificaciones</strong><p>Al deshabilitarlo, se cancelan las entregas pendientes. El dashboard y la recepción de webhooks continúan activos.</p></div><label class="switch-control"><input id="settings-engine-enabled" type="checkbox"><span class="switch-track" aria-hidden="true"></span><span id="settings-engine-value">Deshabilitado</span></label></div>
+        <div class="setting-row retention-row"><div><strong>Retención del historial</strong><p>Las entregas anteriores se eliminan según este plazo. Usa 0 para conservarlas sin limpieza automática.</p></div><label class="retention-input"><span>Días</span><input id="settings-retention-days" type="number" min="0" max="3650" step="1" required></label></div>
+        <div class="settings-footer"><span id="settings-updated-at" class="muted-text">—</span><button class="primary-action" type="submit" id="save-notification-settings">Guardar cambios</button></div>
+      </form>
+      <div class="security-note"><span aria-hidden="true">⚠</span><div><strong>Acceso sin autenticación</strong><p>Cualquier equipo que alcance esta aplicación puede cambiar reglas, destinos y solicitar pruebas. Restringe el puerto mediante firewall a una LAN confiable. Los valores secretos solo se muestran en el momento de introducirlos.</p></div></div>
+    </section>
+
+    <footer class="page-footer"><span>NaftaMon Web</span><span>Sin autenticación · Uso en LAN de confianza</span><span id="notifications-footer-update">Notifications</span></footer>
+  </div>
+  </main>
+
+  <dialog class="editor-dialog" id="rule-dialog" aria-labelledby="rule-dialog-title">
+    <form id="rule-form" novalidate>
+      <div class="dialog-heading"><div><p class="eyebrow">CONFIGURACIÓN DE ALERTAS</p><h2 id="rule-dialog-title">Nueva regla</h2></div><button class="dialog-close" type="button" data-close-dialog="rule-dialog" aria-label="Cerrar">×</button></div>
+      <div class="dialog-body">
+        <input id="rule-id" type="hidden">
+        <div class="form-grid"><label class="form-field"><span>Nombre <em>requerido</em></span><input id="rule-name" type="text" maxlength="100" required placeholder="Ej. Disco crítico en bases de datos"></label><label class="form-field"><span>Descripción <small>opcional</small></span><input id="rule-description" type="text" maxlength="1000" placeholder="Cuándo y por qué se usa esta regla"></label></div>
+        <fieldset class="form-section"><legend>Condiciones</legend><div class="condition-toolbar"><label class="form-field compact"><span>Coincidencia</span><select id="rule-condition-operator"><option value="AND">Todas las condiciones (AND)</option><option value="OR">Cualquiera (OR)</option></select></label><button class="secondary-action small-action" id="add-condition" type="button">＋ Condición</button></div><div id="rule-condition-list" class="condition-list"></div><p class="field-hint">Se comparan campos del Gateway; plugin output no está disponible. Wildcard admite * y ?.</p></fieldset>
+        <fieldset class="form-section"><legend>Eventos que notifican</legend><div class="event-options"><label><input type="checkbox" name="rule-event" value="opened"><span>Nueva alerta</span></label><label><input type="checkbox" name="rule-event" value="state_changed"><span>Cambio de estado</span></label><label><input type="checkbox" name="rule-event" value="recovered"><span>Recuperación</span></label><label><input type="checkbox" name="rule-event" value="reminder"><span>Recordatorio</span></label></div></fieldset>
+        <fieldset class="form-section"><legend>Destinos y frecuencia</legend><div class="channel-choice-list" id="rule-channel-choices"><p class="field-hint">Cargando canales…</p></div><div class="form-grid frequency-grid"><label class="form-field"><span>Cooldown por episodio <small>segundos</small></span><input id="rule-cooldown" type="number" min="0" max="31536000" step="1" value="0"></label><label class="form-field"><span>Recordatorio cada <small>opcional · segundos</small></span><input id="rule-reminder" type="number" min="1" max="31536000" step="1" placeholder="Desactivado"></label></div></fieldset>
+        <fieldset class="form-section"><legend>Plantillas</legend><label class="form-field"><span>Asunto</span><input id="rule-subject-template" type="text" maxlength="500" required></label><label class="form-field"><span>Mensaje</span><textarea id="rule-body-template" rows="3" maxlength="2000" required></textarea></label><p class="field-hint">Variables admitidas: {source}, {source_id}, {server}, {backend}, {host}, {service}, {type}, {state}, {old_state}, {timestamp}, {event_type}, {acknowledged}, {downtime}.</p></fieldset>
+        <label class="form-check enabled-check"><input id="rule-enabled" type="checkbox"><span>Habilitar esta regla</span></label>
+        <div id="rule-form-error" class="inline-form-error" role="alert" hidden></div>
+      </div>
+      <div class="dialog-footer"><button class="secondary-action" type="button" data-close-dialog="rule-dialog">Cancelar</button><button class="primary-action" type="submit" id="save-rule">Guardar regla</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="editor-dialog channel-dialog" id="channel-dialog" aria-labelledby="channel-dialog-title">
+    <form id="channel-form" novalidate>
+      <div class="dialog-heading"><div><p class="eyebrow">DESTINO DE NOTIFICACIÓN</p><h2 id="channel-dialog-title">Nuevo canal</h2></div><button class="dialog-close" type="button" data-close-dialog="channel-dialog" aria-label="Cerrar">×</button></div>
+      <div class="dialog-body">
+        <input id="channel-id" type="hidden">
+        <div class="form-grid"><label class="form-field"><span>Nombre <em>requerido</em></span><input id="channel-name" type="text" maxlength="100" required placeholder="Ej. Telegram Operaciones"></label><label class="form-field"><span>Proveedor</span><select id="channel-provider"><option value="telegram">Telegram</option><option value="gotify">Gotify</option><option value="ntfy">ntfy</option><option value="webhook">Webhook HTTP</option></select></label></div>
+        <div class="provider-config" data-provider-fields="telegram"><div class="provider-intro"><strong>Telegram</strong><span>El bot debe poder enviar mensajes al Chat ID configurado.</span></div><label class="form-field"><span>Chat ID</span><input id="telegram-chat-id" type="text" maxlength="128" placeholder="ID numérico o @canal"></label><label class="form-field secret-field"><span>Bot Token <small class="secret-state" data-secret-state="telegram">No configurado</small></span><input id="telegram-bot-token" type="password" autocomplete="new-password" placeholder="Token del bot; se guarda cifrado" spellcheck="false"></label></div>
+        <div class="provider-config" data-provider-fields="gotify" hidden><div class="provider-intro"><strong>Gotify</strong><span>Para usar un servidor LAN, configura su CIDR permitido en el host antes de crear el canal.</span></div><label class="form-field"><span>URL base</span><input id="gotify-base-url" type="url" placeholder="https://gotify.example.org"></label><div class="form-grid"><label class="form-field"><span>Prioridad <small>0 a 10</small></span><input id="gotify-priority" type="number" min="0" max="10" step="1" value="5"></label><label class="form-field secret-field"><span>Application Token <small class="secret-state" data-secret-state="gotify">No configurado</small></span><input id="gotify-app-token" type="password" autocomplete="new-password" placeholder="Se guarda cifrado" spellcheck="false"></label></div></div>
+        <div class="provider-config" data-provider-fields="ntfy" hidden><div class="provider-intro"><strong>ntfy</strong><span>Un topic público puede aceptar sin credenciales; protege el servidor si requiere acceso privado.</span></div><label class="form-field"><span>URL base</span><input id="ntfy-base-url" type="url" placeholder="https://ntfy.example.org"></label><div class="form-grid"><label class="form-field"><span>Topic</span><input id="ntfy-topic" type="text" maxlength="128" placeholder="infra-alerts"></label><label class="form-field"><span>Prioridad <small>1 a 5</small></span><input id="ntfy-priority" type="number" min="1" max="5" step="1" value="3"></label></div><div class="provider-intro"><strong>Autenticación opcional</strong><span>Deja los campos vacíos para conservar credenciales existentes o enviar sin autenticación.</span></div><label class="form-field secret-field"><span>Access Token <small class="secret-state" data-secret-state="ntfy">Credencial no confirmada</small></span><input id="ntfy-access-token" type="password" autocomplete="new-password" placeholder="Se guarda cifrado" spellcheck="false"></label><div class="form-grid"><label class="form-field secret-field"><span>Usuario</span><input id="ntfy-username" type="password" autocomplete="new-password" placeholder="Opcional" spellcheck="false"></label><label class="form-field secret-field"><span>Contraseña</span><input id="ntfy-password" type="password" autocomplete="new-password" placeholder="Opcional" spellcheck="false"></label></div></div>
+        <div class="provider-config" data-provider-fields="webhook" hidden><div class="provider-intro"><strong>Webhook HTTP</strong><span>Solo POST application/json. El destino debe ser explícitamente permitido por la configuración de red del servidor.</span></div><label class="form-field"><span>URL</span><input id="webhook-url" type="url" placeholder="https://hooks.example.org/alerts"></label><div class="form-grid"><label class="form-field"><span>Método</span><input value="POST" disabled></label><label class="form-field"><span>Content-Type</span><input value="application/json" disabled></label></div><fieldset class="form-section compact-section"><legend>Headers personalizados</legend><div id="webhook-header-list" class="webhook-header-list"></div><button class="secondary-action small-action" id="add-webhook-header" type="button">＋ Header secreto</button><p class="field-hint">El nombre del header no es secreto; su valor se envía solo al guardarlo y nunca se vuelve a leer.</p></fieldset><label class="form-field"><span>Plantilla JSON</span><textarea id="webhook-json-template" class="json-template" rows="6" spellcheck="false"></textarea></label><p class="field-hint">Variables seguras disponibles: {source}, {source_id}, {server}, {backend}, {type}, {host}, {service}, {state}, {old_state}, {timestamp}, {event_type}, {acknowledged}, {downtime}.</p></div>
+        <div class="form-grid channel-common-fields"><label class="form-field"><span>Timeout <small>segundos</small></span><input id="channel-timeout" type="number" min="1" max="60" step="1" value="10"></label><label class="form-field"><span>Intervalo mínimo entre pruebas <small>segundos</small></span><input id="channel-rate-limit" type="number" min="0" max="3600" step="1" value="1"></label></div>
+        <label class="form-check enabled-check"><input id="channel-enabled" type="checkbox"><span>Habilitar este canal</span></label>
+        <p class="field-hint secret-edit-note" id="channel-secret-note" hidden>El API no devuelve credenciales. Deja los campos secretos vacíos para conservar las existentes. El dashboard no almacena secretos.</p>
+        <div id="channel-form-error" class="inline-form-error" role="alert" hidden></div>
+      </div>
+      <div class="dialog-footer"><button class="secondary-action" type="button" data-close-dialog="channel-dialog">Cancelar</button><button class="primary-action" type="submit" id="save-channel">Guardar canal</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="editor-dialog test-dialog" id="rule-test-dialog" aria-labelledby="rule-test-title">
+    <div class="dialog-heading"><div><p class="eyebrow">SIMULACIÓN LOCAL</p><h2 id="rule-test-title">Test Rule</h2></div><button class="dialog-close" type="button" data-close-dialog="rule-test-dialog" aria-label="Cerrar">×</button></div>
+    <div class="dialog-body"><div class="dry-run-badge"><span aria-hidden="true">✓</span> Dry-run: no se crea ninguna entrega y no se contacta ningún canal.</div><p id="rule-test-summary" class="test-summary">Evaluando alertas actuales…</p><div class="dry-run-results" id="rule-test-results"></div></div>
+    <div class="dialog-footer"><button class="primary-action" type="button" data-close-dialog="rule-test-dialog">Cerrar</button></div>
+  </dialog>
+
+  <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+    <div class="dialog-heading"><div><p class="eyebrow">CONFIRMAR ACCIÓN</p><h2 id="confirm-title">¿Continuar?</h2></div><button class="dialog-close" type="button" data-close-dialog="confirm-dialog" aria-label="Cerrar">×</button></div>
+    <div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button class="secondary-action" type="button" data-close-dialog="confirm-dialog">Cancelar</button><button class="danger-action" id="confirm-accept" type="button">Eliminar</button></div>
+  </dialog>
+</body>
+</html>

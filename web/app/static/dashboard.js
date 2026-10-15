@@ -1,0 +1,493 @@
+(() => {
+  "use strict";
+
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const state = {
+    alerts: [], sources: [], offlineAfter: 900, historyItems: [], historyTotal: 0,
+    pollMs: 5000, timer: null, refreshing: false, lastSuccess: null,
+    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50,
+    historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(), pagingWarning: false,
+    alertRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
+  };
+  const stateOrder = { CRITICAL: 0, DOWN: 1, UNREACHABLE: 2, WARNING: 3, UNKNOWN: 4 };
+  const refs = {
+    connection: $("#connection-state"), connectionLabel: $("#connection-label"),
+    backendBanner: $("#backend-banner"), backendError: $("#backend-error-text"),
+    warning: $("#data-warning"), warningText: $("#data-warning-text"), firstData: $("#first-data"),
+    alertBody: $("#alerts-body"), tableEmpty: $("#table-empty"), tableEmptyTitle: $("#table-empty-title"), tableEmptyText: $("#table-empty-text"),
+    sourcesGrid: $("#sources-grid"), sourcesEmpty: $("#sources-empty"), historyBody: $("#history-body"), historyEmpty: $("#history-empty"),
+  };
+
+  function storageGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
+  function storageSet(key, value) { try { localStorage.setItem(key, value); } catch { /* Storage may be disabled. */ } }
+  function make(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+  function setText(selector, value) { const node = $(selector); if (node) node.textContent = String(value); }
+  function normalize(value) { return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("es"); }
+  function parseDate(value) { const time = Date.parse(value || ""); return Number.isFinite(time) ? new Date(time) : null; }
+  const dateFormat = new Intl.DateTimeFormat("es-AR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  function formatDate(value) { const date = parseDate(value); return date ? dateFormat.format(date) : "—"; }
+  function ageText(seconds) {
+    const value = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (value < 60) return `Hace ${value} s`;
+    const minutes = Math.floor(value / 60);
+    if (minutes < 60) return `Hace ${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `Hace ${hours} h ${minutes % 60} min`;
+    return `Hace ${Math.floor(hours / 24)} d ${hours % 24} h`;
+  }
+  function sourceAge(source) {
+    const clock = state.sourceClocks.get(source.id);
+    if (clock) return Math.max(0, clock.age + (Date.now() - clock.at) / 1000);
+    return Math.max(0, Number(source.age_seconds) || 0);
+  }
+  function sourceIsOffline(source) { return Boolean(source.offline) || sourceAge(source) > state.offlineAfter; }
+  function setConnection(kind, label) { refs.connection.dataset.state = kind; refs.connectionLabel.textContent = label; }
+  function updateTheme(theme) {
+    const selected = theme === "light" ? "light" : "dark";
+    document.documentElement.dataset.theme = selected;
+    $("#theme-label").textContent = selected === "dark" ? "Tema claro" : "Tema oscuro";
+    $("#theme-toggle").setAttribute("aria-label", selected === "dark" ? "Cambiar a tema claro" : "Cambiar a tema oscuro");
+    storageSet("naftamon-theme", selected);
+  }
+  function syncSelect(select, values, allLabel) {
+    const current = select.value;
+    const entries = [{ value: "", label: allLabel }, ...values];
+    const signature = JSON.stringify(entries);
+    if (select.dataset.optionsSignature === signature) return;
+    if (current && !entries.some((entry) => String(entry.value) === current)) entries.push({ value: current, label: `${current} (sin alertas actuales)` });
+    select.replaceChildren(...entries.map((entry) => {
+      const option = document.createElement("option"); option.value = String(entry.value); option.textContent = entry.label; return option;
+    }));
+    select.dataset.optionsSignature = signature;
+    select.value = entries.some((entry) => String(entry.value) === current) ? current : "";
+  }
+  function updateFilterOptions() {
+    const servers = [...new Set([...state.alerts.map((alert) => alert.server), ...state.sources.flatMap((source) => (source.servers || []).map((server) => server.name))])].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const backends = [...new Set(state.alerts.map((alert) => alert.backend).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const sourceValues = [...new Map(state.sources.map((source) => [String(source.id), { value: source.id, label: `${source.source} · ${source.peer_ip}` }])).values()]
+      .sort((a, b) => a.label.localeCompare(b.label, "es", { sensitivity: "base" }));
+    syncSelect($("#filter-server"), servers.map((value) => ({ value, label: value })), "Todos");
+    syncSelect($("#filter-backend"), backends.map((value) => ({ value, label: value })), "Todos");
+    syncSelect($("#filter-source"), sourceValues, "Todas");
+    syncSelect($("#history-source"), sourceValues, "Todas");
+    const sourceServerNames = [...new Set(state.sources.flatMap((source) => (source.servers || []).map((server) => server.name)))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    syncSelect($("#history-server"), sourceServerNames.map((value) => ({ value, label: value })), "Todos");
+  }
+
+  async function getJSON(url) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status} en ${url}`);
+      return await response.json();
+    } catch (error) {
+      if (error.name === "AbortError") throw new Error("La consulta al backend superó 12 segundos.");
+      throw error;
+    } finally { window.clearTimeout(timer); }
+  }
+  async function fetchAllAlerts() {
+    const limit = 500;
+    const first = await getJSON(`/api/v1/alerts?limit=${limit}&offset=0`);
+    if (!Array.isArray(first.items)) throw new Error("La API de alertas devolvió un formato inesperado.");
+    const expected = Number(first.total) || 0;
+    const rows = new Map(first.items.map((item) => [String(item.id), item]));
+    const offsets = [];
+    for (let offset = limit; offset < expected; offset += limit) offsets.push(offset);
+    for (let index = 0; index < offsets.length; index += 4) {
+      const pages = await Promise.all(offsets.slice(index, index + 4).map((offset) => getJSON(`/api/v1/alerts?limit=${limit}&offset=${offset}`)));
+      for (const page of pages) {
+        if (!Array.isArray(page.items)) throw new Error("La API devolvió una página de alertas inválida.");
+        for (const item of page.items) rows.set(String(item.id), item);
+      }
+    }
+    return { items: [...rows.values()], expected, changedDuringPaging: rows.size !== expected };
+  }
+  async function fetchHistory() {
+    const query = new URLSearchParams({ limit: String(state.historyPageSize), offset: String(state.historyPage * state.historyPageSize) });
+    if ($("#history-source").value) query.set("source_id", $("#history-source").value);
+    if ($("#history-server").value) query.set("server", $("#history-server").value);
+    const result = await getJSON(`/api/v1/history?${query}`);
+    state.historyItems = Array.isArray(result.items) ? result.items : [];
+    state.historyTotal = Number(result.total) || 0;
+    renderHistory();
+  }
+  async function refresh() {
+    if (state.refreshing) return;
+    state.refreshing = true;
+    setConnection("loading", "Actualizando datos");
+    try {
+      const [health, sourceResult, alertResult] = await Promise.all([
+        getJSON("/healthz"), getJSON("/api/v1/sources"), fetchAllAlerts(),
+      ]);
+      if (health.status !== "ok" || !Array.isArray(sourceResult.items)) throw new Error("El backend respondió con un estado no válido.");
+      state.sources = sourceResult.items;
+      state.offlineAfter = Math.max(1, Number(sourceResult.offline_after_seconds) || 900);
+      state.alerts = alertResult.items;
+      state.pagingWarning = alertResult.changedDuringPaging;
+      state.lastSuccess = Date.now();
+      state.sourceClocks = new Map(state.sources.map((source) => [source.id, { age: Number(source.age_seconds) || 0, at: state.lastSuccess }]));
+      refs.backendBanner.hidden = true;
+      setConnection("ok", "Backend disponible");
+      updateFilterOptions();
+      renderDashboard();
+      if (state.activeView === "history") {
+        try { await fetchHistory(); }
+        catch (error) { showHistoryError(error); }
+      }
+    } catch (error) {
+      refs.backendBanner.hidden = false;
+      refs.backendError.textContent = error instanceof Error ? error.message : "No se pudo consultar el backend.";
+      setConnection("error", "Backend no disponible");
+      if (state.lastSuccess !== null) refs.backendError.textContent += ` Se conserva en pantalla la última actualización correcta de ${formatDate(new Date(state.lastSuccess).toISOString())}.`;
+    } finally {
+      state.refreshing = false;
+      if (state.lastSuccess !== null) setText("#footer-update", `Actualizado ${formatDate(new Date(state.lastSuccess).toISOString())}`);
+      renderAges();
+    }
+  }
+
+  function sourceLabel(sourceId) {
+    const source = state.sources.find((item) => Number(item.id) === Number(sourceId));
+    return source ? `${source.source} · ${source.peer_ip}` : "Fuente desconocida";
+  }
+  function readAlertFilters() {
+    return {
+      host: normalize($("#filter-host").value), service: normalize($("#filter-service").value), text: normalize($("#filter-text").value),
+      state: $("#filter-severity").value, server: $("#filter-server").value, backend: $("#filter-backend").value,
+      source: $("#filter-source").value, ack: $("#filter-ack").value, downtime: $("#filter-downtime").value,
+    };
+  }
+  function filteredAlerts() {
+    const filter = readAlertFilters();
+    const broad = (alert) => normalize([alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.type].join(" "));
+    return state.alerts.filter((alert) => {
+      if (filter.host && !normalize(alert.host).includes(filter.host)) return false;
+      if (filter.service && !normalize(alert.service).includes(filter.service)) return false;
+      if (filter.text && !broad(alert).includes(filter.text)) return false;
+      if (filter.state && alert.state !== filter.state) return false;
+      if (filter.server && alert.server !== filter.server) return false;
+      if (filter.backend && alert.backend !== filter.backend) return false;
+      if (filter.source && String(alert.source_id) !== filter.source) return false;
+      if (filter.ack !== "" && String(Boolean(alert.acknowledged)) !== filter.ack) return false;
+      if (filter.downtime !== "" && String(Boolean(alert.downtime)) !== filter.downtime) return false;
+      return true;
+    });
+  }
+  function compareAlerts(a, b) {
+    const key = state.sort.key;
+    let comparison;
+    if (key === "state") comparison = (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9);
+    else if (key === "acknowledged" || key === "downtime") comparison = Number(Boolean(a[key])) - Number(Boolean(b[key]));
+    else if (key === "source") comparison = sourceLabel(a.source_id).localeCompare(sourceLabel(b.source_id), "es", { sensitivity: "base" });
+    else if (key === "last_seen_at") comparison = (Date.parse(a.last_seen_at) || 0) - (Date.parse(b.last_seen_at) || 0);
+    else comparison = String(a[key] ?? "").localeCompare(String(b[key] ?? ""), "es", { numeric: true, sensitivity: "base" });
+    if (comparison === 0) comparison = String(a.host).localeCompare(String(b.host), "es", { numeric: true, sensitivity: "base" });
+    return comparison * state.sort.direction;
+  }
+  function makeAlertRow(alert) {
+    const tr = make("tr");
+    tr.dataset.id = String(alert.id);
+    const cells = Array.from({ length: 10 }, () => make("td"));
+    cells.forEach((td) => tr.append(td));
+    tr._cells = cells;
+    return tr;
+  }
+  function updateAlertRow(tr, alert) {
+    const signature = JSON.stringify([alert.source_id, alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.stale, alert.acknowledged, alert.downtime, alert.last_seen_at]);
+    if (tr.dataset.signature === signature) return;
+    tr.dataset.signature = signature;
+    const cells = tr._cells;
+    cells.forEach((cell) => cell.replaceChildren());
+    const source = make("span", "cell-primary", alert.source || "—");
+    const sourceSub = make("small", "source-ident", `#${alert.source_id} · ${alert.peer_ip || "IP no disponible"}`);
+    cells[0].append(source, sourceSub); cells[0].title = `${alert.source || "Fuente"} · ${alert.peer_ip || ""}`;
+    cells[1].append(make("span", "cell-primary", alert.server));
+    cells[2].append(make("span", alert.backend ? "" : "cell-muted", alert.backend || "—"));
+    cells[3].append(make("span", "cell-primary", alert.host));
+    cells[4].append(make("span", alert.service ? "" : "cell-muted", alert.service || "— (host)"));
+    const severity = make("span", "severity-badge", alert.state); severity.dataset.state = alert.state; cells[5].append(severity);
+    const confirmed = make("span", `confirm-badge${alert.stale ? " is-stale" : ""}`, alert.stale ? "Sin confirmar" : "Actual"); cells[6].append(confirmed);
+    const ack = make("span", `flag-badge${alert.acknowledged ? " is-on" : ""}`, alert.acknowledged ? "Sí" : "No"); cells[7].append(ack);
+    const down = make("span", `flag-badge${alert.downtime ? " is-downtime" : ""}`, alert.downtime ? "Sí" : "No"); cells[8].append(down);
+    const received = make("span", "cell-mono", formatDate(alert.last_seen_at)); received.title = alert.last_seen_at || ""; cells[9].append(received);
+  }
+  function moveNodes(container, nodes) {
+    nodes.forEach((node, index) => {
+      const current = container.children[index];
+      if (current !== node) container.insertBefore(node, current || null);
+    });
+    while (container.children.length > nodes.length) container.lastElementChild.remove();
+  }
+  function renderAlerts() {
+    const allFiltered = filteredAlerts().sort(compareAlerts);
+    const totalPages = Math.max(1, Math.ceil(allFiltered.length / state.pageSize));
+    state.page = Math.min(state.page, totalPages - 1);
+    const pageItems = allFiltered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
+    const nodes = pageItems.map((alert) => {
+      const key = String(alert.id);
+      let tr = state.alertRows.get(key);
+      if (!tr) { tr = makeAlertRow(alert); state.alertRows.set(key, tr); }
+      updateAlertRow(tr, alert);
+      return tr;
+    });
+    const visibleIds = new Set(pageItems.map((alert) => String(alert.id)));
+    for (const key of state.alertRows.keys()) if (!visibleIds.has(key)) state.alertRows.delete(key);
+    moveNodes(refs.alertBody, nodes);
+    const noSources = state.sources.length === 0;
+    const noAlerts = state.alerts.length === 0;
+    refs.tableEmpty.hidden = pageItems.length !== 0;
+    if (noSources) {
+      refs.tableEmptyTitle.textContent = "Todavía no hay snapshots recibidos";
+      refs.tableEmptyText.textContent = "El backend está disponible, pero no tiene fuentes registradas. Esperando el primer webhook periódico.";
+    } else if (noAlerts && currentlyHealthy()) {
+      refs.tableEmptyTitle.textContent = "Sin alertas activas";
+      refs.tableEmptyText.textContent = "Todas las fuentes están online y las consultas reportadas son completas. No se recibieron alertas activas en el último snapshot.";
+    } else if (noAlerts) {
+      refs.tableEmptyTitle.textContent = "No hay alertas registradas; estado incompleto";
+      refs.tableEmptyText.textContent = "Hay fuentes offline, datos desactualizados o consultas parciales. La ausencia de alertas no confirma que la infraestructura esté saludable.";
+    } else {
+      refs.tableEmptyTitle.textContent = "No hay resultados con esos filtros";
+      refs.tableEmptyText.textContent = "Prueba cambiar los criterios o limpiar los filtros.";
+    }
+    const start = allFiltered.length ? state.page * state.pageSize + 1 : 0;
+    const end = Math.min((state.page + 1) * state.pageSize, allFiltered.length);
+    setText("#filtered-count", allFiltered.length === state.alerts.length ? `Mostrando ${start}–${end} de ${allFiltered.length} alertas` : `${allFiltered.length} de ${state.alerts.length} alertas coinciden`);
+    setText("#alert-count-label", `${state.alerts.length} ${state.alerts.length === 1 ? "alerta" : "alertas"}`);
+    setText("#tab-alert-count", state.alerts.length);
+    const pagination = $("#pagination"); pagination.hidden = allFiltered.length <= state.pageSize;
+    setText("#page-summary", `Página ${state.page + 1} de ${totalPages}`);
+    $("#page-prev").disabled = state.page <= 0; $("#page-next").disabled = state.page >= totalPages - 1;
+    for (const button of $$("[data-sort]")) {
+      const selected = button.dataset.sort === state.sort.key;
+      button.querySelector(".sort-mark").textContent = selected ? (state.sort.direction === 1 ? "↑" : "↓") : "";
+      button.closest("th").setAttribute("aria-sort", selected ? (state.sort.direction === 1 ? "ascending" : "descending") : "none");
+    }
+  }
+
+  function currentlyHealthy() {
+    return state.sources.length > 0 && state.sources.every((source) => !sourceIsOffline(source) && source.complete && Array.isArray(source.servers) && source.servers.length > 0 && source.servers.every((server) => server.status === "ok" && !server.stale && !server.removed));
+  }
+  function renderMetrics() {
+    const count = (predicate) => state.alerts.filter(predicate).length;
+    const critical = count((alert) => alert.state === "CRITICAL");
+    const warning = count((alert) => alert.state === "WARNING");
+    const unknown = count((alert) => alert.state === "UNKNOWN");
+    const down = count((alert) => alert.type === "host" && alert.state === "DOWN");
+    const unreachable = count((alert) => alert.type === "host" && alert.state === "UNREACHABLE");
+    const affectedHosts = new Set(state.alerts.filter((alert) => alert.type === "host" && ["DOWN", "UNREACHABLE"].includes(alert.state)).map((alert) => `${alert.source_id}|${alert.server}|${alert.host}`)).size;
+    const online = state.sources.filter((source) => !sourceIsOffline(source)).length;
+    setText("#metric-total", state.alerts.length);
+    setText("#metric-critical", critical); setText("#metric-warning", warning); setText("#metric-unknown", unknown);
+    setText("#metric-hosts", affectedHosts); setText("#metric-host-detail", `Down ${down} · Unreachable ${unreachable}`);
+    setText("#metric-sources", `${online} / ${state.sources.length}`);
+    setText("#metric-source-detail", `${state.sources.length - online} offline`);
+    const staleCount = state.alerts.filter((alert) => alert.stale).length;
+    setText("#metric-stale-note", staleCount ? `${staleCount} sin confirmar` : "En todos los servidores");
+    const latest = state.sources.map((source) => source.last_received_at).filter(Boolean).sort().at(-1);
+    setText("#last-received", latest ? formatDate(latest) : "Sin recepciones");
+    if (latest) {
+      const source = state.sources.find((item) => item.last_received_at === latest);
+      setText("#last-received-age", source ? ageText(sourceAge(source)) : "—");
+    } else setText("#last-received-age", "Esperando datos");
+    refs.firstData.hidden = state.sources.length !== 0;
+    setText("#source-count-label", `${state.sources.length} ${state.sources.length === 1 ? "fuente" : "fuentes"}`);
+  }
+  function renderWarning() {
+    const issues = [];
+    const offline = state.sources.filter(sourceIsOffline).length;
+    const staleAlerts = state.alerts.filter((alert) => alert.stale).length;
+    const failedServers = state.sources.flatMap((source) => (source.servers || []).filter((server) => server.status !== "ok" || server.stale || server.removed).map((server) => ({ source, server })));
+    const partial = state.sources.filter((source) => !source.complete).length;
+    if (offline) issues.push(`${offline} ${offline === 1 ? "fuente offline" : "fuentes offline"}`);
+    if (failedServers.length) issues.push(`${failedServers.length} ${failedServers.length === 1 ? "servidor con error, pendiente o retirado" : "servidores con error, pendientes o retirados"}`);
+    if (staleAlerts) issues.push(`${staleAlerts} ${staleAlerts === 1 ? "alerta sin confirmar" : "alertas sin confirmar"}`);
+    else if (partial && !failedServers.length) issues.push(`${partial} ${partial === 1 ? "snapshot parcial" : "snapshots parciales"}`);
+    if (state.pagingWarning) issues.push("la lista cambió mientras se recorrían sus páginas; se volverá a consultar en el próximo ciclo");
+    refs.warning.hidden = issues.length === 0;
+    if (issues.length) refs.warningText.textContent = `${issues.join(" · ")}. Los datos se conservan, pero no deben interpretarse como estado saludable.`;
+  }
+  function makeSourceCard(source) {
+    const card = make("article", "source-card"); card.dataset.sourceId = String(source.id);
+    const top = make("div", "source-card-top");
+    const info = make("div");
+    const name = make("h3", "source-name", source.source); info.append(name);
+    const ident = make("small", "source-ident", `ID ${source.id} · ${source.peer_ip || "peer desconocido"}`); info.append(ident);
+    const badge = make("span", "source-status"); top.append(info, badge); card.append(top);
+    const meta = make("div", "source-meta-grid");
+    const lastMeta = make("div", "source-meta"); lastMeta.append(make("span", "", "Último webhook")); const last = make("strong", "source-last", formatDate(source.last_received_at)); lastMeta.append(last);
+    const ageMeta = make("div", "source-meta"); ageMeta.append(make("span", "", "Tiempo transcurrido")); const age = make("strong", "age-value", "—"); ageMeta.append(age);
+    const alertMeta = make("div", "source-meta"); alertMeta.append(make("span", "", "Alertas activas")); const alerts = make("strong", "source-alert-count", "0"); alertMeta.append(alerts);
+    const snapMeta = make("div", "source-meta"); snapMeta.append(make("span", "", "Snapshot")); const complete = make("strong", "source-complete", "—"); snapMeta.append(complete);
+    meta.append(lastMeta, ageMeta, alertMeta, snapMeta); card.append(meta);
+    const serverBlock = make("div", "source-servers"); serverBlock.append(make("div", "source-servers-title", "Servidores Thruk"));
+    const serverList = make("div", "source-server-list"); serverBlock.append(serverList); card.append(serverBlock);
+    card._refs = { badge, last, age, alerts, complete, serverList };
+    return card;
+  }
+  function updateSourceCard(card, source) {
+    const servers = Array.isArray(source.servers) ? source.servers : [];
+    const signature = JSON.stringify([source.source, source.peer_ip, source.last_received_at, source.complete, servers.map((server) => [server.name, server.status, server.stale, server.removed])]);
+    if (card.dataset.signature !== signature) {
+      card.dataset.signature = signature;
+      const r = card._refs;
+      r.last.textContent = formatDate(source.last_received_at); r.last.title = source.last_received_at || "";
+      r.complete.textContent = source.complete ? "Completo" : "Parcial";
+      const serverNodes = servers.map((server) => {
+        const row = make("div", "source-server-row");
+        row.append(make("span", "source-server-name", server.name));
+        const statusText = server.removed ? "Retirado" : server.status === "ok" ? (server.stale ? "Sin confirmar" : "OK") : server.status === "error" ? "Error" : "Pendiente";
+        const status = make("span", `server-status${server.removed ? " is-removed" : server.status === "error" ? " is-error" : server.status !== "ok" || server.stale ? " is-stale" : ""}`, statusText);
+        row.append(status); return row;
+      });
+      moveNodes(r.serverList, serverNodes);
+      if (!servers.length) r.serverList.replaceChildren(make("div", "source-server-row", "No hay servidores configurados en el snapshot."));
+    }
+    const offline = sourceIsOffline(source);
+    card._refs.badge.textContent = offline ? "Offline" : "Online";
+    card._refs.badge.classList.toggle("is-offline", offline);
+    card._refs.age.textContent = ageText(sourceAge(source));
+    card._refs.age.title = `${Math.floor(sourceAge(source))} s desde la última recepción; offline tras ${state.offlineAfter} s`;
+    card._refs.alerts.textContent = String(state.alerts.filter((alert) => Number(alert.source_id) === Number(source.id)).length);
+    return card;
+  }
+  function renderSources() {
+    const nodes = state.sources.map((source) => {
+      const key = String(source.id);
+      let card = state.sourceCards.get(key);
+      if (!card) { card = makeSourceCard(source); state.sourceCards.set(key, card); }
+      return updateSourceCard(card, source);
+    });
+    moveNodes(refs.sourcesGrid, nodes);
+    refs.sourcesEmpty.hidden = state.sources.length !== 0;
+  }
+  function renderDashboard() { renderMetrics(); renderWarning(); renderAlerts(); renderSources(); renderAges(); }
+
+  function eventTitle(event) {
+    return ({ opened: "Abierta", state_changed: "Cambio de estado", attributes_changed: "Cambio de atributos", recovered: "Recuperada" })[event] || event;
+  }
+  function summarizeChange(value) {
+    if (!value) return "—";
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object") {
+        const pieces = [];
+        if (parsed.state) pieces.push(parsed.state);
+        if (typeof parsed.hard === "boolean") pieces.push(parsed.hard ? "HARD" : "SOFT");
+        if (typeof parsed.acknowledged === "boolean") pieces.push(parsed.acknowledged ? "Acknowledged" : "Sin ack");
+        if (typeof parsed.downtime === "boolean") pieces.push(parsed.downtime ? "Downtime" : "Sin downtime");
+        return pieces.join(" · ") || "Cambio registrado";
+      }
+    } catch { /* State changes are stored as plain state labels. */ }
+    return String(value);
+  }
+  function makeHistoryRow(item) {
+    const tr = make("tr"); tr.dataset.id = String(item.id);
+    for (let i = 0; i < 6; i++) tr.append(make("td"));
+    tr._cells = [...tr.children]; return tr;
+  }
+  function updateHistoryRow(tr, item) {
+    const signature = JSON.stringify([item.observed_at, item.source_name, item.peer_ip, item.server, item.host, item.service, item.event, item.old_value, item.new_value]);
+    if (tr.dataset.signature === signature) return;
+    tr.dataset.signature = signature;
+    const cells = tr._cells;
+    cells[0].textContent = formatDate(item.observed_at); cells[0].title = item.observed_at || "";
+    cells[1].textContent = `${item.source_name || "NaftaMon"} · ${item.peer_ip || ""}`;
+    cells[2].textContent = item.server || "—";
+    cells[3].textContent = item.service ? `${item.host} / ${item.service}` : `${item.host} (host)`;
+    cells[4].textContent = eventTitle(item.event); cells[4].className = `event-${item.event || ""}`;
+    const oldValue = summarizeChange(item.old_value); const newValue = summarizeChange(item.new_value);
+    cells[5].textContent = item.event === "opened" ? `Nueva: ${newValue}` : item.event === "recovered" ? `Anterior: ${oldValue}` : `${oldValue} → ${newValue}`;
+  }
+  function renderHistory() {
+    const pages = Math.max(1, Math.ceil(state.historyTotal / state.historyPageSize));
+    state.historyPage = Math.min(state.historyPage, pages - 1);
+    const nodes = state.historyItems.map((item) => {
+      const key = String(item.id); let tr = state.historyRows.get(key);
+      if (!tr) { tr = makeHistoryRow(item); state.historyRows.set(key, tr); }
+      updateHistoryRow(tr, item); return tr;
+    });
+    const visibleIds = new Set(state.historyItems.map((item) => String(item.id)));
+    for (const key of state.historyRows.keys()) if (!visibleIds.has(key)) state.historyRows.delete(key);
+    moveNodes(refs.historyBody, nodes);
+    refs.historyEmpty.hidden = state.historyItems.length !== 0;
+    $("#history-empty-title").textContent = state.historyTotal === 0 ? "Todavía no hay transiciones registradas" : "No hay cambios para estos filtros";
+    $("#history-empty-text").textContent = "El historial solo muestra aperturas, cambios y recuperaciones observados en snapshots recibidos.";
+    setText("#history-total", `${state.historyTotal} ${state.historyTotal === 1 ? "evento" : "eventos"}`);
+    const pagination = $("#history-pagination"); pagination.hidden = state.historyTotal <= state.historyPageSize;
+    setText("#history-page-summary", `Página ${state.historyPage + 1} de ${pages}`);
+    $("#history-prev").disabled = state.historyPage <= 0; $("#history-next").disabled = state.historyPage >= pages - 1;
+  }
+  function showHistoryError(error) {
+    refs.historyEmpty.hidden = false;
+    $("#history-empty-title").textContent = "No se pudo consultar el historial";
+    $("#history-empty-text").textContent = error instanceof Error ? error.message : "Error consultando historial.";
+  }
+  function renderAges() {
+    for (const source of state.sources) {
+      const card = state.sourceCards.get(String(source.id));
+      if (!card) continue;
+      const age = sourceAge(source); const offline = sourceIsOffline(source);
+      card._refs.age.textContent = ageText(age);
+      card._refs.age.title = `${Math.floor(age)} s desde la última recepción; offline tras ${state.offlineAfter} s`;
+      card._refs.badge.textContent = offline ? "Offline" : "Online";
+      card._refs.badge.classList.toggle("is-offline", offline);
+    }
+    if (state.sources.length && state.lastSuccess !== null) { renderMetrics(); renderWarning(); }
+  }
+
+  function chooseView(view) {
+    state.activeView = view;
+    const alertsActive = view === "alerts";
+    $("#alerts-view").hidden = !alertsActive; $("#history-view").hidden = alertsActive;
+    $("#tab-alerts").classList.toggle("is-active", alertsActive); $("#tab-history").classList.toggle("is-active", !alertsActive);
+    $("#tab-alerts").setAttribute("aria-selected", String(alertsActive)); $("#tab-history").setAttribute("aria-selected", String(!alertsActive));
+    $("#tab-alerts").tabIndex = alertsActive ? 0 : -1; $("#tab-history").tabIndex = alertsActive ? -1 : 0;
+    if (!alertsActive) fetchHistory().catch(showHistoryError);
+  }
+  function restartPolling() { if (state.timer) window.clearTimeout(state.timer); state.timer = window.setTimeout(async () => { await refresh(); restartPolling(); }, state.pollMs); }
+  function scheduleRefresh() { if (state.timer) window.clearTimeout(state.timer); state.timer = window.setTimeout(async () => { await refresh(); restartPolling(); }, 0); }
+
+  $("#filters").addEventListener("submit", (event) => event.preventDefault());
+  $("#filters").addEventListener("input", (event) => { if (event.target.matches("input")) { state.page = 0; renderAlerts(); } });
+  $("#filters").addEventListener("change", (event) => { if (event.target.matches("select")) { state.page = 0; renderAlerts(); } });
+  $("#clear-filters").addEventListener("click", () => {
+    for (const selector of ["#filter-host", "#filter-service", "#filter-text", "#filter-severity", "#filter-server", "#filter-backend", "#filter-source", "#filter-ack", "#filter-downtime"]) $(selector).value = "";
+    state.page = 0; renderAlerts(); $("#filter-host").focus();
+  });
+  for (const button of $$("[data-sort]")) button.addEventListener("click", () => {
+    const key = button.dataset.sort;
+    if (state.sort.key === key) state.sort.direction *= -1;
+    else { state.sort.key = key; state.sort.direction = 1; }
+    renderAlerts();
+  });
+  $("#page-prev").addEventListener("click", () => { state.page = Math.max(0, state.page - 1); renderAlerts(); });
+  $("#page-next").addEventListener("click", () => { state.page += 1; renderAlerts(); });
+  $("#history-prev").addEventListener("click", () => { state.historyPage = Math.max(0, state.historyPage - 1); fetchHistory().catch(showHistoryError); });
+  $("#history-next").addEventListener("click", () => { state.historyPage += 1; fetchHistory().catch(showHistoryError); });
+  $("#history-source").addEventListener("change", () => { state.historyPage = 0; fetchHistory().catch(showHistoryError); });
+  $("#history-server").addEventListener("change", () => { state.historyPage = 0; fetchHistory().catch(showHistoryError); });
+  $("#tab-alerts").addEventListener("click", () => chooseView("alerts"));
+  $("#tab-history").addEventListener("click", () => chooseView("history"));
+  for (const tab of [$("#tab-alerts"), $("#tab-history")]) tab.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); const target = tab.id === "tab-alerts" ? $("#tab-history") : $("#tab-alerts"); target.focus(); target.click(); }
+  });
+  $("#poll-interval").addEventListener("change", (event) => {
+    state.pollMs = Math.max(5000, Number(event.target.value) || 5000); storageSet("naftamon-poll-ms", String(state.pollMs)); restartPolling();
+  });
+  $("#refresh-now").addEventListener("click", scheduleRefresh);
+  $("#retry-now").addEventListener("click", scheduleRefresh);
+  $("#theme-toggle").addEventListener("click", () => updateTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+
+  const savedTheme = storageGet("naftamon-theme"); updateTheme(savedTheme === "light" ? "light" : "dark");
+  const savedInterval = Number(storageGet("naftamon-poll-ms"));
+  if ([5000, 10000, 15000, 30000, 60000].includes(savedInterval)) { state.pollMs = savedInterval; $("#poll-interval").value = String(savedInterval); }
+  window.setInterval(renderAges, 1000);
+  refresh().finally(restartPolling);
+})();

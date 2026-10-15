@@ -37,6 +37,78 @@ Config: `~/.config/naftamon/naftamon.ini`
 
 Tests (core logic + Thruk client against a mock Thruk): `tests/run.sh`
 
+## Docker Desktop development lab (Windows 11)
+
+This lab needs Docker Desktop with its WSL2 backend and Linux containers. It does not need a separate Ubuntu installation in WSL2 or access to a live Thruk server. The development image uses Ubuntu 24.04, Qt6 and qmake6. Source files are bind mounted from this repository; `build/` and the test configuration live in Docker volumes, so rebuilds reuse existing objects. The only configured server is the bundled Thruk mock (`admin` / `secret`, test credentials only). The webhook receiver logs Gateway JSON when the engine is enabled; it is off by default.
+
+Run these commands in PowerShell from the repository root:
+
+```powershell
+docker compose -f compose.dev.yaml up --build -d
+docker compose -f compose.dev.yaml ps
+docker compose -f compose.dev.yaml exec dev bash -lc 'mkdir -p build && cd build && qmake6 ../naftamon.pro && make -j"$(nproc)"'
+docker compose -f compose.dev.yaml run --rm -T dev bash tests/run.sh
+```
+
+The test command is headless and runs the Thruk, Webhook Gateway, and Qt widget checks in normal, `--no-wait`, and `--basic` modes. For a manual Qt6 check, start the compiled application and open [noVNC](http://localhost:6080/vnc.html?autoconnect=1) in a Windows browser:
+
+```powershell
+docker compose -f compose.dev.yaml exec -d dev bash -lc './build/naftamon > /lab-state/naftamon.log 2>&1'
+docker compose -f compose.dev.yaml exec dev cat /lab-state/naftamon.log
+```
+
+The desktop also has an xterm. The app configuration is `/lab-state/config/naftamon.ini` inside the `dev` container. It is created on first start with only the mock endpoint. The repository and Windows home directory are never used as the app's configuration directory. The app can update that config; the Docker `state` volume keeps it across restarts. To check the mock API and send a sample JSON payload to the sink over the private Compose network:
+
+```powershell
+docker compose -f compose.dev.yaml exec dev python3 docker/lab-smoke.py
+docker compose -f compose.dev.yaml exec dev python3 docker/lab-audit.py
+docker compose -f compose.dev.yaml logs --tail=50 thruk webhooks
+```
+
+Only noVNC publishes a Windows localhost port (`6080`). The mock and webhook receiver are reachable inside Compose as `thruk:18765` and `webhooks:8080`, so Windows reserved ports cannot block them. To inspect and stop the lab:
+
+```powershell
+docker compose -f compose.dev.yaml logs -f dev thruk webhooks
+docker compose -f compose.dev.yaml down
+```
+
+`down` preserves the build and state volumes. `docker compose -f compose.dev.yaml down -v` deletes those lab volumes and resets the test configuration and compiled objects.
+
+## Webhook Gateway
+
+The Gateway is disabled by default. In the main window, **Gateway: Disabled/Enabled** shows its state and switches delivery on or off immediately. Choose **Configure…** beside it to enter an HTTP or HTTPS URL and a send interval from 1 to 86400 seconds. Save applies the values immediately and preserves them across restarts. The line beside the buttons shows the time and HTTP result of the last send, including connection errors. Disabling stops the timer and aborts an in-flight periodic POST.
+
+**Test Webhook** in the configuration window sends a separate JSON marked as a test to the URL currently entered there. It works while the Gateway is disabled and reports the HTTP status, up to 4 KiB of the response body, or a connection error without freezing the window. It does not save the URL or enable periodic delivery; use **Save** and then the main switch for that. One manual test and one periodic POST may be in progress at a time. A canceled periodic send is shown as "Cancelled". In the Docker lab, enter `http://webhooks:8080/webhook` and inspect the received JSON with `docker compose -f compose.dev.yaml logs -f webhooks` or `docker compose -f compose.dev.yaml exec dev python3 -c "import urllib.request; print(urllib.request.urlopen('http://webhooks:8080/received').read().decode())"`.
+
+The preferences use the existing QSettings INI file (in the lab: `/lab-state/config/naftamon.ini`):
+
+```ini
+webhook_enabled=true
+webhook_url=http://webhooks:8080/webhook
+webhook_interval_seconds=60
+```
+
+When editing the INI manually, restart NaftaMon to reload it. The GUI writes the same keys and applies changes while NaftaMon runs.
+
+Periodic POSTs use this JSON format (example values):
+
+```json
+{
+  "timestamp": "2026-10-14T22:00:00.000Z",
+  "source": "NaftaMon",
+  "complete": true,
+  "servers": [{"server": "Thruk de prueba", "status": "ok"}],
+  "alerts": [{
+    "server": "Thruk de prueba", "backend": "alpha", "host": "db01", "service": "disk",
+    "type": "service", "state": "CRITICAL", "hard": true,
+    "acknowledged": false, "downtime": false,
+    "last_check": "2026-10-14T21:59:00Z", "last_change": "2026-10-14T21:30:00Z"
+  }]
+}
+```
+
+An empty successful poll sends `"complete": true` with `"alerts": []`. A failed or pending poll sends `"complete": false` and marks the corresponding server `"error"` or `"pending"`; its stale cached alerts are excluded. The test button sends `{"type":"test","test":true,"source":"NaftaMon","timestamp":"…","message":"NaftaMon test webhook"}` without alerts. The gateway does not use table, search, state, acknowledgement, or downtime filters. It sends no Thruk URL, username, password, token, or free-form plugin output. Backends excluded in a Thruk server's configuration are absent from that server's poll and therefore absent from the payload. The lab receiver accepts JSON bodies up to 8 MiB and retains the last 10 for test inspection at `/received`; `/stats` exposes request counters.
+
 ## Why it is faster than Nagstamon
 
 Measured cause of the slow "recheck" in Nagstamon (source read at commit ed379f9):

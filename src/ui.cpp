@@ -27,6 +27,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPlainTextEdit>
 #include <QProcess>
 #include <QProgressDialog>
 #include <QStyledItemDelegate>
@@ -90,6 +91,7 @@ static QList<QPair<QString, bool *>> boolFields(AppConfig &c) {
     Filters &f = c.filters;
     return {
         {"floating_bar", &c.floatingBar},
+        {"webhook_enabled", &c.webhookEnabled},
         {"filter_all_down_hosts", &f.allDownHosts},
         {"filter_all_unreachable_hosts", &f.allUnreachableHosts},
         {"filter_all_flapping_hosts", &f.allFlappingHosts},
@@ -141,6 +143,8 @@ void AppConfig::loadSettings(const std::function<QVariant(const QString &, const
         if (!r.second->re.isValid()) r.second->enabled = false;
     }
     intervalSec = qBound(1, get("update_interval_seconds", intervalSec).toInt(), 3600);
+    webhookUrl = get("webhook_url", webhookUrl).toString().trimmed();
+    webhookIntervalSeconds = qBound(1, get("webhook_interval_seconds", webhookIntervalSeconds).toInt(), 86400);
     for (int st = 0; st < STATE_COUNT; ++st) {
         notifyIf[st] = get("notify_if_" + lower(State(st)), notifyIf[st]).toBool();
         customSound[st] = get("notification_custom_sound_" + lower(State(st)), customSound[st]).toString();
@@ -222,6 +226,8 @@ void AppConfig::save() const {
         s.setValue(r.first + "_pattern", r.second->re.pattern());
     }
     s.setValue("update_interval_seconds", intervalSec);
+    s.setValue("webhook_url", webhookUrl);
+    s.setValue("webhook_interval_seconds", webhookIntervalSeconds);
     for (int st = 0; st < STATE_COUNT; ++st) {
         s.setValue("notify_if_" + lower(State(st)), notifyIf[st]);
         s.setValue("notification_custom_sound_" + lower(State(st)), customSound[st]);
@@ -712,6 +718,49 @@ App::App() : proxy(new ItemProxy) {
     if (settingsBtn->icon().isNull()) settingsBtn->setIcon(QIcon::fromTheme("preferences-system"));
     v->addLayout(top);
 
+    auto *gatewayRow = new QHBoxLayout;
+    gatewayToggle = new QToolButton;
+    gatewayToggle->setObjectName("gatewayToggle");
+    gatewayToggle->setCheckable(true);
+    gatewayToggle->setIcon(QIcon::fromTheme("network-transmit-receive"));
+    gatewayToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    gatewayRow->addWidget(gatewayToggle);
+    auto *gatewaySettings = new QToolButton;
+    gatewaySettings->setObjectName("gatewaySettings");
+    gatewaySettings->setText("Configure…");
+    gatewaySettings->setAutoRaise(true);
+    gatewaySettings->setToolTip("Webhook URL, send interval and test request");
+    gatewayRow->addWidget(gatewaySettings);
+    gatewayLine = new QLabel("Last send: Never");
+    gatewayLine->setObjectName("gatewayLastResult");
+    gatewayLine->setTextFormat(Qt::PlainText);
+    gatewayLine->setWordWrap(true);
+    gatewayLine->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    gatewayRow->addWidget(gatewayLine, 1);
+    v->addLayout(gatewayRow);
+    connect(gatewayToggle, &QToolButton::clicked, this, [this](bool enabled) {
+        if (enabled && !WebhookGateway::isValidUrl(cfg.webhookUrl)) {
+            gatewayToggle->setChecked(false);
+            gatewayDialog();
+            return;
+        }
+        cfg.webhookEnabled = enabled;
+        cfg.save();
+        gateway.configure(enabled, cfg.webhookUrl, cfg.webhookIntervalSeconds);
+        updateGatewayUi();
+    });
+    connect(gatewaySettings, &QToolButton::clicked, this, &App::gatewayDialog);
+    connect(&gateway, &WebhookGateway::requestFinished, this,
+            [this](const QDateTime &when, bool test, int status, const QString &error, const QString &) {
+        const QString outcome = error == "Cancelled" ? "Cancelled" :
+            error.isEmpty() ? QString("HTTP %1 OK").arg(status) :
+            status ? QString("HTTP %1 — %2").arg(status).arg(error) : "Connection error — " + error;
+        const QString line = "Last send: " + when.toString("yyyy-MM-dd HH:mm:ss") +
+                             " — " + (test ? "Test: " : "") + outcome;
+        gatewayLine->setText(line);
+        gatewayLine->setToolTip(line);
+    });
+
     view = new QTableView;
     view->setModel(proxy);
     view->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -966,14 +1015,100 @@ App::~App() {
     cfg.headerState = view->horizontalHeader()->saveState();
     if (QGuiApplication::platformName() != "wayland") cfg.barPos = bar->pos();
     cfg.save();
-    delete bar;
     delete window;
+    delete bar;
 }
 
 static bool sameConf(const ServerConf &a, const ServerConf &b) {
     return a.name == b.name && a.url == b.url && a.user == b.user && a.password == b.password &&
            a.disabledBackends == b.disabledBackends && a.ignoreTls == b.ignoreTls &&
            a.useDisplayNameService == b.useDisplayNameService;
+}
+
+void App::updateGatewayUi() {
+    const bool enabled = gateway.isEnabled();
+    gatewayToggle->setChecked(enabled);
+    gatewayToggle->setText(enabled ? "Gateway: Enabled" : "Gateway: Disabled");
+    gatewayToggle->setToolTip(enabled ? "Click to stop webhook delivery" : "Click to start webhook delivery");
+}
+
+void App::gatewayDialog() {
+    QDialog d(window);
+    d.setObjectName("gatewayDialog");
+    d.setWindowTitle("Webhook Gateway");
+    auto *layout = new QVBoxLayout(&d);
+    auto *intro = new QLabel("Send active alerts from all enabled Thruk servers. Configure the destination, "
+                             "then use the Gateway switch on the main window to enable delivery.");
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    auto *form = new QFormLayout;
+    auto *url = new QLineEdit(cfg.webhookUrl);
+    url->setObjectName("gatewayUrl");
+    url->setPlaceholderText("https://example.com/webhook");
+    form->addRow("Webhook URL:", url);
+    auto *interval = new QSpinBox;
+    interval->setObjectName("gatewayInterval");
+    interval->setRange(1, 86400);
+    interval->setSuffix(" s");
+    interval->setValue(cfg.webhookIntervalSeconds);
+    form->addRow("Send every:", interval);
+    layout->addLayout(form);
+    auto *testButton = new QPushButton("Test Webhook");
+    testButton->setObjectName("gatewayTest");
+    layout->addWidget(testButton, 0, Qt::AlignLeft);
+    auto *result = new QPlainTextEdit;
+    result->setObjectName("gatewayTestResult");
+    result->setReadOnly(true);
+    result->setPlainText("The test sends a JSON marked as a test; it does not include alerts.");
+    result->setMaximumHeight(120);
+    layout->addWidget(result);
+    bool pendingTest = false;
+    connect(testButton, &QPushButton::clicked, &d, [this, url, testButton, result, &pendingTest] {
+        const QString target = url->text().trimmed();
+        if (!WebhookGateway::isValidUrl(target)) {
+            result->setPlainText("Enter a valid HTTP or HTTPS URL without embedded credentials.");
+            return;
+        }
+        if (!gateway.testWebhook(target)) {
+            result->setPlainText("A test request is already in progress. Try again when it finishes.");
+            return;
+        }
+        pendingTest = true;
+        testButton->setEnabled(false);
+        result->setPlainText("Sending test webhook…");
+    });
+    connect(&gateway, &WebhookGateway::requestFinished, &d,
+            [testButton, result, &pendingTest](const QDateTime &, bool test, int status,
+                                                const QString &error, const QString &response) {
+        if (!test || !pendingTest) return;
+        pendingTest = false;
+        testButton->setEnabled(true);
+        QString message = error.isEmpty() ? QString("Test delivered: HTTP %1").arg(status) :
+                        status ? QString("Test failed: HTTP %1 — %2").arg(status).arg(error) :
+                                 "Test failed: " + error;
+        if (!response.isEmpty()) message += "\nResponse: " + response;
+        result->setPlainText(message);
+    });
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+    connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked, &d,
+            [this, &d, url, interval, result] {
+        const QString target = url->text().trimmed();
+        if ((!target.isEmpty() && !WebhookGateway::isValidUrl(target)) ||
+            (cfg.webhookEnabled && target.isEmpty())) {
+            result->setPlainText("Enter a valid HTTP or HTTPS URL without embedded credentials before saving.");
+            return;
+        }
+        cfg.webhookUrl = target;
+        cfg.webhookIntervalSeconds = interval->value();
+        cfg.save();
+        gateway.configure(cfg.webhookEnabled, cfg.webhookUrl, cfg.webhookIntervalSeconds);
+        updateGatewayUi();
+        d.accept();
+    });
+    layout->addWidget(buttons);
+    d.resize(520, d.sizeHint().height());
+    d.exec();
 }
 
 // Keeps connections (session, data) of servers whose settings did not change, so saving
@@ -1008,6 +1143,9 @@ void App::applyConfig() {
         s->refresh();
     }
     for (auto *s : old) s->deleteLater();  // removed or changed servers
+    gateway.setServers(servers);
+    gateway.configure(cfg.webhookEnabled, cfg.webhookUrl, cfg.webhookIntervalSeconds);
+    updateGatewayUi();
     model.multiServer = servers.size() > 1;
     view->setColumnHidden(StatusModel::Backend, false);  // was hidden with one server
     if (!cfg.flash) bar->setFlashing(false);  // takes effect now, not only for the next notification

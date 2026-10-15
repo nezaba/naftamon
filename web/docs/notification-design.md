@@ -1,0 +1,42 @@
+# NaftaMon Web — diseño de notificaciones (etapa 5A)
+
+## Contrato y límites
+
+La entrada sigue siendo el snapshot documentado en [webhook-contract.md](webhook-contract.md). El Gateway identifica una alerta por servidor, backend, tipo, host y servicio; `source` es el literal `NaftaMon`, sin identificador estable de instalación. Web agrupa provisionalmente por `source` e IP TCP observada. Se admiten reglas sobre `source_id` local, servidor, backend, tipo, host, servicio, estado, `hard`, `acknowledged` y `downtime`. No existe plugin output: no se ofrece ese filtro ni `{output}`. `last_check` y `last_change` son tiempos informados por Desktop; el evento usa la hora UTC de recepción web.
+
+## Orden de implementación y verificación
+
+1. **5A, diseño:** revisar contrato, reconciliación, migraciones y navegación; fijar eventos, modelo, APIs, seguridad y pruebas en este documento. Verificar contra el código existente antes de editarlo.
+2. **5B, backend:** migración SQLite, validación/evaluación de reglas, eventos y outbox atómicos con ingesta, worker separado, adaptadores Telegram/Gotify/ntfy/HTTP, APIs de administración y pruebas. Ejecutar la suite en Docker antes de iniciar 5C.
+3. **5C, interfaz:** menú Notifications con Rules, Channels, History y Settings; formularios, prueba de regla sin envío, prueba explícita de canal, estados/error, diseño móvil. Probar en navegador y Docker.
+4. **5D, QA:** revisión independiente, pruebas de regresión y seguridad con proveedores simulados, Compose y documentación. Corregir hallazgos críticos.
+
+## Eventos y reconciliación
+
+La ingesta ya usa `BEGIN IMMEDIATE` y compara alertas por clave estable local. En la misma transacción que modifica `active_alerts` se registra un evento inmutable `opened`, `state_changed` o `recovered` y, para cada regla habilitada que coincida, una entrega por canal habilitado. El evento `state_changed` se genera una sola vez aun si cambian flags en el mismo snapshot. Un snapshot idéntico solo refresca frescura. Los mensajes `type=test` no crean eventos. Una recuperación exige que el servidor correspondiente figure con `status=ok`; `complete=false` no impide reconciliar un servidor que sí respondió correctamente. Servidores error/pending, omitidos o retirados y fuentes silenciosas conservan alertas sin eventos de recuperación. Los recordatorios se programan por episodio activo y tiempo, sin depender de nuevas recepciones, pero no se crean para datos stale. No se notifican alertas históricas al instalar la migración ni al habilitar reglas.
+
+## Modelo SQLite
+
+Nueva migración transaccional, sin borrar tablas existentes. `notification_settings` guarda habilitación global (inicialmente 0) y retención. `notification_channels` guarda nombre, tipo, configuración no secreta, secreto cifrado, habilitación (0 inicial), límites y últimos resultados. `notification_rules` guarda nombre, descripción, habilitación (0 inicial), eventos seleccionados, grupo acotado de condiciones, cooldown, intervalo opcional de recordatorio, plantillas y marcas de ejecución. `notification_rule_channels` relaciona reglas y canales. `notification_events` conserva identidad de fuente, clave, episodio, revisión local, tipo, estado anterior/nuevo y tiempo; su índice único evita eventos repetidos. `notification_deliveries` es outbox con clave única evento/regla/canal, estado, próximo intento, lease, recuento y error redactado. `notification_attempts` registra intentos. `notification_suppression_state` conserva cooldown/recordatorio por regla y episodio. El identificador de episodio cambia después de cada recuperación y reapertura.
+
+## Reglas y plantillas
+
+Un grupo plano `AND`/`OR` con hasta un límite definido de condiciones; cada condición usa campos permitidos y operadores `equals`, `not_equals`, `contains`, `not_contains`, `starts_with`, `ends_with`, `wildcard`. La comparación es Unicode casefold; wildcard admite `*` y `?` mediante coincidencia acotada. Los campos ausentes no coinciden salvo comprobaciones explícitas booleanas. No hay `eval`, `exec` ni regex arbitraria. Los eventos seleccionables son `opened`, `state_changed`, `recovered`, `reminder`; nuevos valores por defecto: opened y state_changed. Para recuperación se evalúa el estado previo. Plantillas de asunto y cuerpo solo aceptan variables del contrato: `source`, `source_id`, `server`, `backend`, `host`, `service`, `type`, `state`, `old_state`, `timestamp`, `event_type`, `acknowledged`, `downtime`. La salida se escapa según el formato del proveedor; texto/JSON nunca se ejecuta como código.
+
+## Worker y proveedores
+
+Un proceso worker en Compose usa el mismo SQLite, con un único envío simultáneo. Toma trabajos vencidos bajo `BEGIN IMMEDIATE`, asigna lease y libera la transacción antes de usar la red. Persiste éxito, fallo, reintento y límite de canal. Timeouts, hasta un número acotado de reintentos con backoff exponencial y `Retry-After` para 429. Errores 5xx, 429, timeout y red son temporales; otros 4xx permanentes. Un lease vencido se puede recuperar tras reinicio. La entrega externa es **al menos una vez**: si el proceso muere tras enviar y antes de registrar éxito, un proveedor sin idempotencia puede recibir duplicado. Se añade identificador estable a HTTP donde sea útil. Deshabilitar el motor, la regla o el canal impide nuevos envíos; un reencendido no reenvía todo el inventario existente.
+
+Los adaptadores tienen interfaz común y configuración validada: Telegram `sendMessage` por HTTPS; Gotify `POST /message` con `X-Gotify-Key`; ntfy JSON publish a la URL raíz; webhook HTTP POST JSON con headers permitidos y plantilla controlada. [Apprise](https://github.com/caronc/apprise) ofrece un catálogo amplio de destinos configurables mediante URL. Se prefiere una implementación pequeña de cuatro adaptadores en esta versión: permite auditar explícitamente los destinos permitidos, el cifrado y la semántica de errores de cada proveedor. Apprise podrá incorporarse detrás de esa interfaz si se necesitan más destinos; habilitar sus esquemas de URL sin revisión ampliaría la superficie de SSRF y de configuración de secretos.
+
+## Seguridad y operación
+
+Secretos cifrados de forma autenticada con clave en archivo externo al volumen SQLite y excluido de Git/imagen. Sin clave, se rechaza guardar secretos y el worker no envía canales que la requieran. Lecturas de API jamás devuelven tokens, y logs/historial guardan errores saneados. Actualizar un token no requiere revelar el anterior. La clave se respalda por separado de SQLite. URLs validan esquema/host/puerto, rechazan credenciales embebidas, loopback, link-local y metadatos, redirecciones y proxies. Las IP privadas se permiten solo mediante CIDR explícito para Gotify/ntfy/webhook local, con validación DNS al enviar. HTTPS es obligatorio para destinos públicos. Telegram usa host fijo oficial. Nunca usar destinos reales en pruebas.
+
+El dashboard y las APIs seguirán sin autenticación por decisión de esta versión. Cualquier par con acceso al puerto puede cambiar reglas o destinos y solicitar una prueba de canal. Limitar el puerto con firewall/VPN a la LAN confiable es condición operacional; CORS no es un control de acceso. La ingesta no espera ningún envío y sigue aceptando snapshots cuando los proveedores fallan.
+
+## API y pruebas previstas
+
+Rutas JSON bajo `/api/v1/notifications`: GET/PUT settings; GET/POST/PUT/DELETE channels y POST `channels/{id}/test`; GET/POST/PUT/DELETE rules, POST `rules/{id}/duplicate` y POST `rules/{id}/test` (evaluación pura); GET history paginado y filtrable. Validación estricta de límites y errores 4xx sin mostrar secretos. La UI consume estas rutas del mismo origen.
+
+Pruebas: operadores/campos reales, severidades y booleanos, AND/OR, reglas y canales deshabilitados, eventos y episodios, snapshots repetidos, parciales y error, fuente stale, reminder/cooldown, migración desde v3, persistencia/reinicio, fallos/timeout/429/5xx, límite de intentos y canal, redacción de secretos, SSRF, dry-run sin envío, mocks locales para cuatro proveedores, Compose y navegación móvil/escritorio. En una instalación sin dos PCs, la recepción remota física queda pendiente como en la etapa anterior.

@@ -1,0 +1,57 @@
+name: naftamon-lab
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      DISPLAY: ":99"
+      HOME: /tmp/naftamon-home
+      XDG_RUNTIME_DIR: /tmp/naftamon-runtime
+      NAFTAMON_CONFIG: /lab-state/config/naftamon.ini
+    volumes:
+      - ./:/workspace
+      - build:/workspace/build
+      - state:/lab-state
+    ports:
+      - "127.0.0.1:6080:6080"
+    depends_on:
+      thruk:
+        condition: service_healthy
+      webhooks:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      test: ["CMD-SHELL", "xdpyinfo -display :99 >/dev/null 2>&1 && python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:6080/vnc.html', timeout=2)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  thruk:
+    image: python:3.12-slim
+    environment:
+      MOCK_THRUK_BIND: 0.0.0.0
+    command: ["python3", "-u", "/app/mock_thruk.py", "18765"]
+    volumes:
+      - ./tests/mock_thruk.py:/app/mock_thruk.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18765/thruk/_stats', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  webhooks:
+    image: python:3.12-slim
+    command: ["python3", "-u", "/app/webhook_receiver.py"]
+    volumes:
+      - ./docker/webhook_receiver.py:/app/webhook_receiver.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  build:
+  state:

@@ -9,6 +9,7 @@ for mode in "" --no-wait --basic; do
     pid=$!
     sleep 0.5
     echo "== mock Thruk ${mode:-with wait feature}"
-    MOCK_URL=http://127.0.0.1:18765/thruk build/tests/naftamon-tests || { kill $pid; exit 1; }
+    QT_QPA_PLATFORM=offscreen MOCK_URL=http://127.0.0.1:18765/thruk WEBHOOK_URL=http://webhooks:8080/webhook \
+        build/tests/naftamon-tests || { kill $pid; exit 1; }
     kill $pid
 done

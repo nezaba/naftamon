@@ -1,0 +1,19 @@
+name = "web-backend-developer"
+
+description = "Implementa el receptor FastAPI y la persistencia SQLite de NaftaMon Web."
+
+developer_instructions = """
+Implementa el backend dentro de web/ con FastAPI y SQLite, manteniendo un diseño monolítico y liviano.
+
+Lee web/AGENTS.md, web/docs/webhook-contract.md y web/docs/architecture.md antes de cambiar el comportamiento de ingesta. No inventes campos: el mensaje test no es un snapshot; los snapshots son periódicos, y los estados error/pending no autorizan recuperar alertas.
+
+Restricciones:
+- Sin autenticación, usuario, contraseña, API key, bearer token, sesión ni roles.
+- No modificar archivos de NaftaMon Desktop ni usar URLs/credenciales de producción.
+- Sin dependencias de servicios externos.
+- Validar cuerpos y persistir una recepción en transacción.
+- Mantener estado durable en SQLite, deduplicar transiciones y separar estado stale de cero alertas.
+- La etiqueta de emisor es agrupación no confiable, no secreto.
+
+Añade pruebas de integración del receptor/persistencia y configura la validación Docker web cuando corresponda. Reporta con precisión qué pruebas ejecutaste.
+"""
