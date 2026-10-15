@@ -91,6 +91,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 @media (max-width: 500px) { .topbar { padding-inline: 12px; }.brand { gap: 8px; }.brand-mark { width: 32px; height: 32px; }.poll-control { gap: 5px; padding: 0 5px 0 8px; }.poll-control label { display: none; }.icon-button, .theme-button { width: 34px; height: 34px; }.topbar-tools { gap: 5px; }.page-shell { padding-inline: 12px; }.page-heading h1 { font-size: 25px; }.page-subtitle { font-size: 12px; }.metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.metric-card { min-height: 108px; }.metric-note { font-size: 9px; }.filters { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 11px; }.search-host, .search-service, .search-text, .select-field, .clear-filters { grid-column: span 2; }.view-tabs { gap: 15px; }.view-tab { font-size: 11px; }.sources-grid { grid-template-columns: 1fr; }.receipt-strip { gap: 7px; font-size: 10px; }.receipt-strip .strip-separator { display: none; }.poll-indicator { width: 100%; margin-left: 26px; }.page-footer { flex-wrap: wrap; }.page-footer span:last-child { width: 100%; }.history-filters { flex-direction: column; }.history-filters .select-field { width: 100%; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 
+.alerts-table { min-width: 1430px; }
+.status-information-cell { width: 280px; max-width: 280px; }
+.status-information-text { display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-information-text.is-unavailable { color: var(--muted-2); }
+.status-information-text[tabindex="0"] { cursor: help; }
+.status-information-text[tabindex="0"]:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.severity-badge[data-state="UP"]:not([data-state="CRITICAL"]):not([data-state="DOWN"]):not([data-state="WARNING"]):not([data-state="UNKNOWN"]):not([data-state="UNREACHABLE"]) { background: var(--good-soft); color: var(--good); }
+
 /* Notifications workspace */
 .notifications-app[hidden], .notification-view[hidden], .notification-links[hidden], .provider-config[hidden] { display: none !important; }
 .app-navigation { border-bottom: 1px solid var(--line); background: var(--surface); }

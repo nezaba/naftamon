@@ -4,13 +4,13 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const state = {
-    alerts: [], sources: [], offlineAfter: 900, historyItems: [], historyTotal: 0,
+    alerts: [], statuses: [], sources: [], offlineAfter: 900, historyItems: [], historyTotal: 0,
     pollMs: 5000, timer: null, refreshing: false, lastSuccess: null,
     sort: { key: "state", direction: 1 }, page: 0, pageSize: 50,
     historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(), pagingWarning: false,
-    alertRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
+    statusRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
   };
-  const stateOrder = { CRITICAL: 0, DOWN: 1, UNREACHABLE: 2, WARNING: 3, UNKNOWN: 4 };
+  const stateOrder = { CRITICAL: 0, DOWN: 1, UNREACHABLE: 2, WARNING: 3, UNKNOWN: 4, UP: 5 };
   const refs = {
     connection: $("#connection-state"), connectionLabel: $("#connection-label"),
     backendBanner: $("#backend-banner"), backendError: $("#backend-error-text"),
@@ -68,8 +68,8 @@
     select.value = entries.some((entry) => String(entry.value) === current) ? current : "";
   }
   function updateFilterOptions() {
-    const servers = [...new Set([...state.alerts.map((alert) => alert.server), ...state.sources.flatMap((source) => (source.servers || []).map((server) => server.name))])].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
-    const backends = [...new Set(state.alerts.map((alert) => alert.backend).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const servers = [...new Set([...state.statuses.map((item) => item.server), ...state.sources.flatMap((source) => (source.servers || []).map((server) => server.name))])].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const backends = [...new Set(state.statuses.map((item) => item.backend).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
     const sourceValues = [...new Map(state.sources.map((source) => [String(source.id), { value: source.id, label: `${source.source} · ${source.peer_ip}` }])).values()]
       .sort((a, b) => a.label.localeCompare(b.label, "es", { sensitivity: "base" }));
     syncSelect($("#filter-server"), servers.map((value) => ({ value, label: value })), "Todos");
@@ -92,18 +92,18 @@
       throw error;
     } finally { window.clearTimeout(timer); }
   }
-  async function fetchAllAlerts() {
+  async function fetchAllStatuses() {
     const limit = 500;
-    const first = await getJSON(`/api/v1/alerts?limit=${limit}&offset=0`);
-    if (!Array.isArray(first.items)) throw new Error("La API de alertas devolvió un formato inesperado.");
+    const first = await getJSON(`/api/v1/statuses?limit=${limit}&offset=0`);
+    if (!Array.isArray(first.items)) throw new Error("La API de monitoreo devolvió un formato inesperado.");
     const expected = Number(first.total) || 0;
     const rows = new Map(first.items.map((item) => [String(item.id), item]));
     const offsets = [];
     for (let offset = limit; offset < expected; offset += limit) offsets.push(offset);
     for (let index = 0; index < offsets.length; index += 4) {
-      const pages = await Promise.all(offsets.slice(index, index + 4).map((offset) => getJSON(`/api/v1/alerts?limit=${limit}&offset=${offset}`)));
+      const pages = await Promise.all(offsets.slice(index, index + 4).map((offset) => getJSON(`/api/v1/statuses?limit=${limit}&offset=${offset}`)));
       for (const page of pages) {
-        if (!Array.isArray(page.items)) throw new Error("La API devolvió una página de alertas inválida.");
+        if (!Array.isArray(page.items)) throw new Error("La API devolvió una página de monitoreo inválida.");
         for (const item of page.items) rows.set(String(item.id), item);
       }
     }
@@ -123,14 +123,15 @@
     state.refreshing = true;
     setConnection("loading", "Actualizando datos");
     try {
-      const [health, sourceResult, alertResult] = await Promise.all([
-        getJSON("/healthz"), getJSON("/api/v1/sources"), fetchAllAlerts(),
+      const [health, sourceResult, statusResult] = await Promise.all([
+        getJSON("/healthz"), getJSON("/api/v1/sources"), fetchAllStatuses(),
       ]);
       if (health.status !== "ok" || !Array.isArray(sourceResult.items)) throw new Error("El backend respondió con un estado no válido.");
       state.sources = sourceResult.items;
       state.offlineAfter = Math.max(1, Number(sourceResult.offline_after_seconds) || 900);
-      state.alerts = alertResult.items;
-      state.pagingWarning = alertResult.changedDuringPaging;
+      state.statuses = statusResult.items;
+      state.alerts = state.statuses.filter((item) => item.state !== "UP");
+      state.pagingWarning = statusResult.changedDuringPaging;
       state.lastSuccess = Date.now();
       state.sourceClocks = new Map(state.sources.map((source) => [source.id, { age: Number(source.age_seconds) || 0, at: state.lastSuccess }]));
       refs.backendBanner.hidden = true;
@@ -164,19 +165,19 @@
       source: $("#filter-source").value, ack: $("#filter-ack").value, downtime: $("#filter-downtime").value,
     };
   }
-  function filteredAlerts() {
+  function filteredStatuses() {
     const filter = readAlertFilters();
-    const broad = (alert) => normalize([alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.type].join(" "));
-    return state.alerts.filter((alert) => {
-      if (filter.host && !normalize(alert.host).includes(filter.host)) return false;
-      if (filter.service && !normalize(alert.service).includes(filter.service)) return false;
-      if (filter.text && !broad(alert).includes(filter.text)) return false;
-      if (filter.state && alert.state !== filter.state) return false;
-      if (filter.server && alert.server !== filter.server) return false;
-      if (filter.backend && alert.backend !== filter.backend) return false;
-      if (filter.source && String(alert.source_id) !== filter.source) return false;
-      if (filter.ack !== "" && String(Boolean(alert.acknowledged)) !== filter.ack) return false;
-      if (filter.downtime !== "" && String(Boolean(alert.downtime)) !== filter.downtime) return false;
+    const broad = (item) => normalize([item.source, item.peer_ip, item.server, item.backend, item.host, item.service, item.state, item.type, item.status_information].join(" "));
+    return state.statuses.filter((item) => {
+      if (filter.host && !normalize(item.host).includes(filter.host)) return false;
+      if (filter.service && !normalize(item.service).includes(filter.service)) return false;
+      if (filter.text && !broad(item).includes(filter.text)) return false;
+      if (filter.state && item.state !== filter.state) return false;
+      if (filter.server && item.server !== filter.server) return false;
+      if (filter.backend && item.backend !== filter.backend) return false;
+      if (filter.source && String(item.source_id) !== filter.source) return false;
+      if (filter.ack !== "" && String(Boolean(item.acknowledged)) !== filter.ack) return false;
+      if (filter.downtime !== "" && String(Boolean(item.downtime)) !== filter.downtime) return false;
       return true;
     });
   }
@@ -191,16 +192,16 @@
     if (comparison === 0) comparison = String(a.host).localeCompare(String(b.host), "es", { numeric: true, sensitivity: "base" });
     return comparison * state.sort.direction;
   }
-  function makeAlertRow(alert) {
+  function makeStatusRow(alert) {
     const tr = make("tr");
     tr.dataset.id = String(alert.id);
-    const cells = Array.from({ length: 10 }, () => make("td"));
+    const cells = Array.from({ length: 11 }, () => make("td"));
     cells.forEach((td) => tr.append(td));
     tr._cells = cells;
     return tr;
   }
   function updateAlertRow(tr, alert) {
-    const signature = JSON.stringify([alert.source_id, alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.stale, alert.acknowledged, alert.downtime, alert.last_seen_at]);
+    const signature = JSON.stringify([alert.source_id, alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.status_information, alert.stale, alert.acknowledged, alert.downtime, alert.last_seen_at]);
     if (tr.dataset.signature === signature) return;
     tr.dataset.signature = signature;
     const cells = tr._cells;
@@ -213,10 +214,19 @@
     cells[3].append(make("span", "cell-primary", alert.host));
     cells[4].append(make("span", alert.service ? "" : "cell-muted", alert.service || "— (host)"));
     const severity = make("span", "severity-badge", alert.state); severity.dataset.state = alert.state; cells[5].append(severity);
-    const confirmed = make("span", `confirm-badge${alert.stale ? " is-stale" : ""}`, alert.stale ? "Sin confirmar" : "Actual"); cells[6].append(confirmed);
-    const ack = make("span", `flag-badge${alert.acknowledged ? " is-on" : ""}`, alert.acknowledged ? "Sí" : "No"); cells[7].append(ack);
-    const down = make("span", `flag-badge${alert.downtime ? " is-downtime" : ""}`, alert.downtime ? "Sí" : "No"); cells[8].append(down);
-    const received = make("span", "cell-mono", formatDate(alert.last_seen_at)); received.title = alert.last_seen_at || ""; cells[9].append(received);
+    const statusInformation = typeof alert.status_information === "string" ? alert.status_information : "";
+    const informationText = statusInformation.trim() ? statusInformation : "-";
+    const information = make("span", `status-information-text${statusInformation.trim() ? "" : " is-unavailable"}`, informationText);
+    if (statusInformation.trim()) {
+      information.title = statusInformation;
+      information.setAttribute("aria-label", `Status Information completo: ${statusInformation}`);
+      information.tabIndex = 0;
+    }
+    cells[6].className = "status-information-cell"; cells[6].append(information);
+    const confirmed = make("span", `confirm-badge${alert.stale ? " is-stale" : ""}`, alert.stale ? "Sin confirmar" : "Actual"); cells[7].append(confirmed);
+    const ack = make("span", `flag-badge${alert.acknowledged ? " is-on" : ""}`, alert.acknowledged ? "Sí" : "No"); cells[8].append(ack);
+    const down = make("span", `flag-badge${alert.downtime ? " is-downtime" : ""}`, alert.downtime ? "Sí" : "No"); cells[9].append(down);
+    const received = make("span", "cell-mono", formatDate(alert.last_seen_at)); received.title = alert.last_seen_at || ""; cells[10].append(received);
   }
   function moveNodes(container, nodes) {
     nodes.forEach((node, index) => {
@@ -226,41 +236,41 @@
     while (container.children.length > nodes.length) container.lastElementChild.remove();
   }
   function renderAlerts() {
-    const allFiltered = filteredAlerts().sort(compareAlerts);
+    const allFiltered = filteredStatuses().sort(compareAlerts);
     const totalPages = Math.max(1, Math.ceil(allFiltered.length / state.pageSize));
     state.page = Math.min(state.page, totalPages - 1);
     const pageItems = allFiltered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
     const nodes = pageItems.map((alert) => {
       const key = String(alert.id);
-      let tr = state.alertRows.get(key);
-      if (!tr) { tr = makeAlertRow(alert); state.alertRows.set(key, tr); }
+      let tr = state.statusRows.get(key);
+      if (!tr) { tr = makeStatusRow(alert); state.statusRows.set(key, tr); }
       updateAlertRow(tr, alert);
       return tr;
     });
     const visibleIds = new Set(pageItems.map((alert) => String(alert.id)));
-    for (const key of state.alertRows.keys()) if (!visibleIds.has(key)) state.alertRows.delete(key);
+    for (const key of state.statusRows.keys()) if (!visibleIds.has(key)) state.statusRows.delete(key);
     moveNodes(refs.alertBody, nodes);
     const noSources = state.sources.length === 0;
-    const noAlerts = state.alerts.length === 0;
+    const noStatuses = state.statuses.length === 0;
     refs.tableEmpty.hidden = pageItems.length !== 0;
     if (noSources) {
       refs.tableEmptyTitle.textContent = "Todavía no hay snapshots recibidos";
       refs.tableEmptyText.textContent = "El backend está disponible, pero no tiene fuentes registradas. Esperando el primer webhook periódico.";
-    } else if (noAlerts && currentlyHealthy()) {
-      refs.tableEmptyTitle.textContent = "Sin alertas activas";
-      refs.tableEmptyText.textContent = "Todas las fuentes están online y las consultas reportadas son completas. No se recibieron alertas activas en el último snapshot.";
-    } else if (noAlerts) {
-      refs.tableEmptyTitle.textContent = "No hay alertas registradas; estado incompleto";
-      refs.tableEmptyText.textContent = "Hay fuentes offline, datos desactualizados o consultas parciales. La ausencia de alertas no confirma que la infraestructura esté saludable.";
+    } else if (noStatuses && currentlyHealthy()) {
+      refs.tableEmptyTitle.textContent = "Sin estados de hosts o servicios";
+      refs.tableEmptyText.textContent = "Las consultas están completas y no hay alertas. No se recibieron objetos UP para listar en este snapshot.";
+    } else if (noStatuses) {
+      refs.tableEmptyTitle.textContent = "Sin estados de monitoreo confirmados";
+      refs.tableEmptyText.textContent = "Hay fuentes offline, datos desactualizados o consultas parciales. La ausencia de datos no confirma que la infraestructura esté saludable.";
     } else {
       refs.tableEmptyTitle.textContent = "No hay resultados con esos filtros";
       refs.tableEmptyText.textContent = "Prueba cambiar los criterios o limpiar los filtros.";
     }
     const start = allFiltered.length ? state.page * state.pageSize + 1 : 0;
     const end = Math.min((state.page + 1) * state.pageSize, allFiltered.length);
-    setText("#filtered-count", allFiltered.length === state.alerts.length ? `Mostrando ${start}–${end} de ${allFiltered.length} alertas` : `${allFiltered.length} de ${state.alerts.length} alertas coinciden`);
-    setText("#alert-count-label", `${state.alerts.length} ${state.alerts.length === 1 ? "alerta" : "alertas"}`);
-    setText("#tab-alert-count", state.alerts.length);
+    setText("#filtered-count", allFiltered.length === state.statuses.length ? `Mostrando ${start}–${end} de ${allFiltered.length} hosts y servicios` : `${allFiltered.length} de ${state.statuses.length} estados coinciden`);
+    setText("#alert-count-label", `${state.statuses.length} ${state.statuses.length === 1 ? "elemento" : "elementos"}`);
+    setText("#tab-alert-count", state.statuses.length);
     const pagination = $("#pagination"); pagination.hidden = allFiltered.length <= state.pageSize;
     setText("#page-summary", `Página ${state.page + 1} de ${totalPages}`);
     $("#page-prev").disabled = state.page <= 0; $("#page-next").disabled = state.page >= totalPages - 1;
@@ -302,12 +312,12 @@
   function renderWarning() {
     const issues = [];
     const offline = state.sources.filter(sourceIsOffline).length;
-    const staleAlerts = state.alerts.filter((alert) => alert.stale).length;
+    const staleItems = state.statuses.filter((item) => item.stale).length;
     const failedServers = state.sources.flatMap((source) => (source.servers || []).filter((server) => server.status !== "ok" || server.stale || server.removed).map((server) => ({ source, server })));
     const partial = state.sources.filter((source) => !source.complete).length;
     if (offline) issues.push(`${offline} ${offline === 1 ? "fuente offline" : "fuentes offline"}`);
     if (failedServers.length) issues.push(`${failedServers.length} ${failedServers.length === 1 ? "servidor con error, pendiente o retirado" : "servidores con error, pendientes o retirados"}`);
-    if (staleAlerts) issues.push(`${staleAlerts} ${staleAlerts === 1 ? "alerta sin confirmar" : "alertas sin confirmar"}`);
+    if (staleItems) issues.push(`${staleItems} ${staleItems === 1 ? "estado sin confirmar" : "estados sin confirmar"}`);
     else if (partial && !failedServers.length) issues.push(`${partial} ${partial === 1 ? "snapshot parcial" : "snapshots parciales"}`);
     if (state.pagingWarning) issues.push("la lista cambió mientras se recorrían sus páginas; se volverá a consultar en el próximo ciclo");
     refs.warning.hidden = issues.length === 0;

@@ -94,21 +94,21 @@
     </div>
 
     <nav class="view-tabs" aria-label="Vistas del dashboard" role="tablist">
-      <button type="button" class="view-tab is-active" id="tab-alerts" role="tab" aria-selected="true" aria-controls="alerts-view">Alertas actuales <span class="tab-count" id="tab-alert-count">0</span></button>
+      <button type="button" class="view-tab is-active" id="tab-alerts" role="tab" aria-selected="true" aria-controls="alerts-view">Monitoreo actual <span class="tab-count" id="tab-alert-count">0</span></button>
       <button type="button" class="view-tab" id="tab-history" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">Historial de cambios</button>
     </nav>
 
     <section class="view-panel" id="alerts-view" role="tabpanel" aria-labelledby="tab-alerts">
       <div class="section-heading">
-        <div><h2>Alertas actuales</h2><p class="section-subtitle">Estado más reciente conocido por cada servidor</p></div>
-        <div class="section-meta"><span class="live-dot" aria-hidden="true"></span><span id="alert-count-label">0 alertas</span></div>
+        <div><h2>Monitoreo actual</h2><p class="section-subtitle">Estados de hosts y servicios recibidos desde NaftaMon Desktop</p></div>
+        <div class="section-meta"><span class="live-dot" aria-hidden="true"></span><span id="alert-count-label">0 elementos</span></div>
       </div>
 
       <form id="filters" class="filters" autocomplete="off">
         <label class="search-field search-host"><span>Host</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-host" type="search" placeholder="Buscar host…" aria-label="Buscar por host"></span></label>
         <label class="search-field search-service"><span>Servicio</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-service" type="search" placeholder="Buscar servicio…" aria-label="Buscar por servicio"></span></label>
-        <label class="search-field search-text"><span>Texto</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-text" type="search" placeholder="Servidor, backend…" aria-label="Buscar en los datos de la alerta"></span></label>
-        <label class="select-field"><span>Severidad</span><select id="filter-severity"><option value="">Todas</option><option>CRITICAL</option><option>WARNING</option><option>UNKNOWN</option><option>DOWN</option><option>UNREACHABLE</option></select></label>
+        <label class="search-field search-text"><span>Texto</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-text" type="search" placeholder="Servidor, backend, Status Information…" aria-label="Buscar en los datos de monitoreo"></span></label>
+        <label class="select-field"><span>Estado</span><select id="filter-severity"><option value="">Todos</option><option>CRITICAL</option><option>WARNING</option><option>UNKNOWN</option><option>DOWN</option><option>UNREACHABLE</option><option value="UP">UP / OK</option></select></label>
         <label class="select-field"><span>Servidor</span><select id="filter-server"><option value="">Todos</option></select></label>
         <label class="select-field"><span>Backend</span><select id="filter-backend"><option value="">Todos</option></select></label>
         <label class="select-field"><span>Fuente</span><select id="filter-source"><option value="">Todas</option></select></label>
@@ -117,8 +117,8 @@
         <button class="clear-filters" id="clear-filters" type="button">Limpiar filtros</button>
       </form>
 
-      <div class="table-toolbar"><span id="filtered-count">Mostrando 0 alertas</span><span class="table-hint">Selecciona un encabezado para ordenar</span></div>
-      <div class="table-scroll" tabindex="0" aria-label="Tabla de alertas, desplazamiento horizontal disponible">
+      <div class="table-toolbar"><span id="filtered-count">Mostrando 0 hosts y servicios</span><span class="table-hint">Selecciona un encabezado para ordenar</span></div>
+      <div class="table-scroll" tabindex="0" aria-label="Tabla de monitoreo; desplazamiento horizontal disponible en pantallas pequeñas">
         <table class="alerts-table">
           <thead><tr>
             <th scope="col"><button data-sort="source" type="button" aria-label="Ordenar por fuente">Fuente <span class="sort-mark"></span></button></th>
@@ -127,6 +127,7 @@
             <th scope="col"><button data-sort="host" type="button">Host <span class="sort-mark"></span></button></th>
             <th scope="col"><button data-sort="service" type="button">Servicio <span class="sort-mark"></span></button></th>
             <th scope="col"><button data-sort="state" type="button" aria-sort="ascending">Estado <span class="sort-mark">↑</span></button></th>
+            <th scope="col"><button data-sort="status_information" type="button">Status Information <span class="sort-mark"></span></button></th>
             <th scope="col">Confirmación</th><th scope="col">Acknowledgement</th><th scope="col">Downtime</th>
             <th scope="col"><button data-sort="last_seen_at" type="button">Última recepción <span class="sort-mark"></span></button></th>
           </tr></thead>
