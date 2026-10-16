@@ -1,10 +1,11 @@
 from contextlib import contextmanager
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 12
 
 # Add future schema changes as transactional SQL statements keyed by version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -251,6 +252,35 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         )""",
         "CREATE INDEX idx_notification_config_backups_created ON notification_config_backups(id DESC)",
     ),
+    9: (
+        "ALTER TABLE latest_snapshots ADD COLUMN payload_gzip BLOB",
+        "ALTER TABLE latest_snapshots ADD COLUMN payload_encoding TEXT NOT NULL DEFAULT 'json'",
+        "CREATE INDEX idx_active_alerts_state ON active_alerts(state, source_id)",
+        "CREATE INDEX idx_monitored_statuses_state ON monitored_statuses(state, source_id)",
+        "CREATE INDEX idx_monitored_statuses_server_backend ON monitored_statuses(server, backend, source_id)",
+    ),
+    10: (
+        "CREATE TABLE app_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+        "INSERT INTO app_state(key, value) VALUES ('monitoring_revision', 0)",
+    ),
+    11: (
+        "ALTER TABLE active_alerts ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE active_alerts ADD COLUMN host_search TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE active_alerts ADD COLUMN service_search TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE monitored_statuses ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE monitored_statuses ADD COLUMN host_search TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE monitored_statuses ADD COLUMN service_search TEXT NOT NULL DEFAULT ''",
+        "UPDATE active_alerts SET search_text = nafta_fold(server || ' ' || backend || ' ' || host || ' ' || service || ' ' || type || ' ' || state || ' ' || status_information), host_search = nafta_fold(host), service_search = nafta_fold(service)",
+        "UPDATE monitored_statuses SET search_text = nafta_fold(server || ' ' || backend || ' ' || host || ' ' || service || ' ' || type || ' ' || state || ' ' || status_information), host_search = nafta_fold(host), service_search = nafta_fold(service)",
+        "CREATE INDEX idx_active_alerts_host_search ON active_alerts(host_search, source_id)",
+        "CREATE INDEX idx_monitored_statuses_host_search ON monitored_statuses(host_search, source_id)",
+    ),
+    12: (
+        # Track whether the current gateway snapshot included the UP-status array.
+        # This keeps old rows stale when legacy senders omit it, without touching
+        # every status row just to advance a per-row timestamp on each poll.
+        "ALTER TABLE monitored_servers ADD COLUMN status_data_revision INTEGER NOT NULL DEFAULT 0",
+    ),
 }
 
 
@@ -261,6 +291,7 @@ def connect(path: Path) -> Iterator[sqlite3.Connection]:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 10000")
+    connection.create_function("nafta_fold", 1, _fold_search, deterministic=True)
     try:
         yield connection
         connection.commit()
@@ -269,6 +300,13 @@ def connect(path: Path) -> Iterator[sqlite3.Connection]:
         raise
     finally:
         connection.close()
+
+
+def _fold_search(value: str | None) -> str:
+    if value is None:
+        return ""
+    decomposed = unicodedata.normalize("NFD", str(value).casefold())
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
 
 
 def initialize(path: Path) -> None:

@@ -7,8 +7,8 @@
   <meta name="theme-color" content="#101821">
   <title>NaftaMon Web — Monitoreo</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.ico">
-  <link rel="stylesheet" href="/static/dashboard.css?v=source-cleanup-20261016">
-  <script src="/static/dashboard.js?v=source-cleanup-20261016" defer></script>
+  <link rel="stylesheet" href="/static/dashboard.css?v=scale-server-20261016">
+  <script src="/static/dashboard.js?v=scale-server-20261016" defer></script>
   <script src="/static/notifications.js" defer></script>
 </head>
 <body>
@@ -78,7 +78,8 @@
       <div><strong>Esperando el primer snapshot</strong><p>El backend responde, pero todavía no recibió información de una fuente. Cuando NaftaMon Desktop envíe su primer webhook, aparecerá aquí.</p></div>
     </div>
 
-    <section class="metrics-grid" aria-label="Resumen de monitoreo">
+    <p class="metrics-scope" id="metrics-scope">Contadores globales, sin filtros de tabla</p>
+    <section class="metrics-grid" aria-label="Resumen global de alertas">
       <article class="metric-card metric-total"><div class="metric-top"><span>Alertas activas</span><span class="metric-glyph" aria-hidden="true">≡</span></div><strong class="metric-value" id="metric-total">—</strong><span class="metric-note" id="metric-stale-note">En todos los servidores</span></article>
       <article class="metric-card metric-critical"><div class="metric-top"><span>Critical</span><span class="severity-dot" aria-hidden="true"></span></div><strong class="metric-value" id="metric-critical">—</strong><span class="metric-note">Servicios y hosts</span></article>
       <article class="metric-card metric-warning"><div class="metric-top"><span>Warning</span><span class="severity-dot" aria-hidden="true"></span></div><strong class="metric-value" id="metric-warning">—</strong><span class="metric-note">Servicios y hosts</span></article>

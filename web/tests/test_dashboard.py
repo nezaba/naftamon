@@ -6,8 +6,8 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Estado de infraestructura" in response.text
-    assert 'href="/static/dashboard.css?v=source-cleanup-20261016"' in response.text
-    assert 'src="/static/dashboard.js?v=source-cleanup-20261016"' in response.text
+    assert 'href="/static/dashboard.css?v=scale-server-20261016"' in response.text
+    assert 'src="/static/dashboard.js?v=scale-server-20261016"' in response.text
     assert not re.search(r'(?:src|href)=["\']https?://', response.text, re.IGNORECASE)
     assert 'id="login"' not in response.text.lower()
     assert not re.search(r'<form[^>]+(?:login|auth)', response.text, re.IGNORECASE)
@@ -25,8 +25,10 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert css.status_code == js.status_code == 200
     assert css.headers["cache-control"] == js.headers["cache-control"] == "no-cache"
     assert "data-theme=\"light\"" in css.text
-    assert "fetchAllStatuses" in js.text
-    assert "/api/v1/statuses?limit=${limit}&offset=${offset}" in js.text
+    assert "fetchAllStatuses" not in js.text
+    assert "function statusQuery(offset, limit, revision = null)" in js.text
+    assert "state.virtualChunkSize" in js.text
+    assert 'requestStatuses(offset, limit, state.pageSize === "all" ? state.virtualRevision : null)' in js.text
     assert "textContent" in js.text
     assert "innerHTML" not in js.text
 
@@ -79,7 +81,7 @@ def test_monitoring_table_exposes_status_information_and_searches_it_safely(clie
     assert "Buscar en los datos de monitoreo" in page
 
     script = client.get("/static/dashboard.js").text
-    assert "item.status_information].join" in script
+    assert 'query.set("query", filter.text)' in script
     assert 'statusInformation.trim() ? statusInformation : "-"' in script
     assert "information.title = statusInformation" in script
     assert 'information.setAttribute("aria-label"' in script
@@ -109,12 +111,13 @@ def test_monitoring_page_size_choices_persist_and_all_mode_uses_filtered_rows(cl
     script = client.get("/static/dashboard.js").text
     assert 'storageSet("naftamon-monitor-page-size"' in script
     assert 'storageGet("naftamon-monitor-page-size")' in script
-    assert 'const allFiltered = filteredStatuses().sort(compareAlerts)' in script
+    assert 'const allFiltered = state.statuses' in script
     assert 'const showAll = state.pageSize === "all"' in script
-    assert 'const virtualized = showAll && allFiltered.length > 250' in script
+    assert 'const virtualized = showAll && total > 250' in script
     assert 'function renderVirtualRows()' in script
-    assert 'if (!sampleRow) { sampleRow = statusRow(items[0], 0); refs.alertBody.append(sampleRow); }' in script
-    assert 'sampleRow.getBoundingClientRect().height || 56' in script
+    assert 'if (!sampleRow && state.statuses.length)' in script
+    assert 'sampleRow?.getBoundingClientRect().height || 56' in script
+    assert 'fetchVirtualChunk(offset)' in script
     assert 'setAttribute("aria-rowcount"' in script
     assert 'setAttribute("aria-rowindex"' in script
 
