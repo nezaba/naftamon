@@ -4,8 +4,8 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const state = {
-    alerts: [], statuses: [], sources: [], offlineAfter: 900, historyItems: [], historyTotal: 0,
-    pollMs: 5000, timer: null, refreshing: false, lastSuccess: null,
+    alerts: [], statuses: [], sources: [], offlineAfter: 900, inactiveAfter: 86400, historyItems: [], historyTotal: 0,
+    pollMs: 5000, timer: null, refreshing: false, refreshPending: false, lastSuccess: null,
     sort: { key: "state", direction: 1 }, page: 0, pageSize: 50, filteredAlerts: [], virtualized: false, virtualTop: null, virtualBottom: null,
     historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(), pagingWarning: false,
     statusRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
@@ -41,12 +41,20 @@
     if (hours < 24) return `Hace ${hours} h ${minutes % 60} min`;
     return `Hace ${Math.floor(hours / 24)} d ${hours % 24} h`;
   }
+  function durationLabel(seconds) {
+    const value = Math.max(1, Math.floor(Number(seconds) || 0));
+    if (value % 86400 === 0) return `${value / 86400} d`;
+    if (value % 3600 === 0) return `${value / 3600} h`;
+    if (value % 60 === 0) return `${value / 60} min`;
+    return `${value} s`;
+  }
   function sourceAge(source) {
     const clock = state.sourceClocks.get(source.id);
     if (clock) return Math.max(0, clock.age + (Date.now() - clock.at) / 1000);
     return Math.max(0, Number(source.age_seconds) || 0);
   }
   function sourceIsOffline(source) { return Boolean(source.offline) || sourceAge(source) > state.offlineAfter; }
+  function sourceIsInactive(source) { return sourceAge(source) > state.inactiveAfter; }
   function setConnection(kind, label) { refs.connection.dataset.state = kind; refs.connectionLabel.textContent = label; }
   function updateTheme(theme) {
     const selected = theme === "light" ? "light" : "dark";
@@ -119,7 +127,7 @@
     renderHistory();
   }
   async function refresh() {
-    if (state.refreshing) return;
+    if (state.refreshing) { state.refreshPending = true; return; }
     state.refreshing = true;
     setConnection("loading", "Actualizando datos");
     try {
@@ -129,6 +137,7 @@
       if (health.status !== "ok" || !Array.isArray(sourceResult.items)) throw new Error("El backend respondió con un estado no válido.");
       state.sources = sourceResult.items;
       state.offlineAfter = Math.max(1, Number(sourceResult.offline_after_seconds) || 900);
+      state.inactiveAfter = Math.max(1, Number(sourceResult.inactive_after_seconds) || 86400);
       state.statuses = statusResult.items;
       state.alerts = state.statuses.filter((item) => item.state !== "UP");
       state.pagingWarning = statusResult.changedDuringPaging;
@@ -151,6 +160,7 @@
       state.refreshing = false;
       if (state.lastSuccess !== null) setText("#footer-update", `Actualizado ${formatDate(new Date(state.lastSuccess).toISOString())}`);
       renderAges();
+      if (state.refreshPending) { state.refreshPending = false; window.setTimeout(refresh, 0); }
     }
   }
 
@@ -386,7 +396,8 @@
     const info = make("div");
     const name = make("h3", "source-name", source.source); info.append(name);
     const ident = make("small", "source-ident", `ID ${source.id} · ${source.peer_ip || "peer desconocido"}`); info.append(ident);
-    const badge = make("span", "source-status"); top.append(info, badge); card.append(top);
+    const badges = make("div", "source-badges");
+    const badge = make("span", "source-status"); const activity = make("span", "source-activity"); badges.append(badge, activity); top.append(info, badges); card.append(top);
     const meta = make("div", "source-meta-grid");
     const lastMeta = make("div", "source-meta"); lastMeta.append(make("span", "", "Último webhook")); const last = make("strong", "source-last", formatDate(source.last_received_at)); lastMeta.append(last);
     const ageMeta = make("div", "source-meta"); ageMeta.append(make("span", "", "Tiempo transcurrido")); const age = make("strong", "age-value", "—"); ageMeta.append(age);
@@ -395,10 +406,14 @@
     meta.append(lastMeta, ageMeta, alertMeta, snapMeta); card.append(meta);
     const serverBlock = make("div", "source-servers"); serverBlock.append(make("div", "source-servers-title", "Servidores Thruk"));
     const serverList = make("div", "source-server-list"); serverBlock.append(serverList); card.append(serverBlock);
-    card._refs = { badge, last, age, alerts, complete, serverList };
+    const actions = make("div", "source-actions");
+    const remove = make("button", "danger-action", "Eliminar fuente inactiva"); remove.type = "button"; remove.hidden = true;
+    remove.addEventListener("click", () => openSourceDelete(card._source)); actions.append(remove); card.append(actions);
+    card._refs = { badge, activity, last, age, alerts, complete, serverList, remove };
     return card;
   }
   function updateSourceCard(card, source) {
+    card._source = source;
     const servers = Array.isArray(source.servers) ? source.servers : [];
     const signature = JSON.stringify([source.source, source.peer_ip, source.last_received_at, source.complete, servers.map((server) => [server.name, server.status, server.stale, server.removed])]);
     if (card.dataset.signature !== signature) {
@@ -419,6 +434,11 @@
     const offline = sourceIsOffline(source);
     card._refs.badge.textContent = offline ? "Offline" : "Online";
     card._refs.badge.classList.toggle("is-offline", offline);
+    const inactive = sourceIsInactive(source);
+    card._refs.activity.textContent = inactive ? "Inactiva" : "Activa";
+    card._refs.activity.classList.toggle("is-inactive", inactive);
+    card._refs.activity.title = `Umbral de inactividad: ${durationLabel(state.inactiveAfter)}`;
+    card._refs.remove.hidden = !inactive;
     card._refs.age.textContent = ageText(sourceAge(source));
     card._refs.age.title = `${Math.floor(sourceAge(source))} s desde la última recepción; offline tras ${state.offlineAfter} s`;
     card._refs.alerts.textContent = String(state.alerts.filter((alert) => Number(alert.source_id) === Number(source.id)).length);
@@ -505,8 +525,44 @@
       card._refs.age.title = `${Math.floor(age)} s desde la última recepción; offline tras ${state.offlineAfter} s`;
       card._refs.badge.textContent = offline ? "Offline" : "Online";
       card._refs.badge.classList.toggle("is-offline", offline);
+      const inactive = sourceIsInactive(source);
+      card._refs.activity.textContent = inactive ? "Inactiva" : "Activa";
+      card._refs.activity.classList.toggle("is-inactive", inactive);
+      card._refs.activity.title = `Umbral de inactividad: ${durationLabel(state.inactiveAfter)}`;
+      card._refs.remove.hidden = !inactive;
     }
     if (state.sources.length && state.lastSuccess !== null) { renderMetrics(); renderWarning(); }
+  }
+
+  function openSourceDelete(source) {
+    if (!source || !sourceIsInactive(source)) return;
+    const dialog = $("#source-delete-dialog");
+    dialog.dataset.sourceId = String(source.id);
+    $("#source-delete-message").textContent = `¿Eliminar “${source.source}” (${source.peer_ip || "peer desconocido"})? Última información recibida ${formatDate(source.last_received_at)} (${ageText(sourceAge(source))}).`;
+    $("#source-delete-error").hidden = true;
+    $("#source-delete-error").textContent = "";
+    $("#source-delete-accept").disabled = false;
+    dialog.showModal();
+    $("#source-delete-cancel").focus();
+  }
+
+  async function deleteSelectedSource() {
+    const dialog = $("#source-delete-dialog");
+    const sourceId = Number(dialog.dataset.sourceId);
+    if (!Number.isInteger(sourceId) || sourceId < 1) return;
+    const button = $("#source-delete-accept"); const error = $("#source-delete-error");
+    button.disabled = true; error.hidden = true;
+    try {
+      const response = await fetch(`/api/v1/sources/${sourceId}`, { method: "DELETE", headers: { Accept: "application/json" }, cache: "no-store" });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+      dialog.close();
+      state.sourceCards.delete(String(sourceId));
+      await refresh();
+    } catch (cause) {
+      error.textContent = cause instanceof Error ? cause.message : "No se pudo eliminar la fuente.";
+      error.hidden = false;
+    } finally { button.disabled = false; }
   }
 
   function chooseView(view) {
@@ -570,6 +626,9 @@
   $("#refresh-now").addEventListener("click", scheduleRefresh);
   $("#retry-now").addEventListener("click", scheduleRefresh);
   $("#theme-toggle").addEventListener("click", () => updateTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+  $("#source-delete-accept").addEventListener("click", deleteSelectedSource);
+  $("#source-delete-cancel").addEventListener("click", () => $("#source-delete-dialog").close());
+  $("#source-delete-close").addEventListener("click", () => $("#source-delete-dialog").close());
 
   const savedTheme = storageGet("naftamon-theme"); updateTheme(savedTheme === "light" ? "light" : "dark");
   const savedInterval = Number(storageGet("naftamon-poll-ms"));

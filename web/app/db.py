@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Add future schema changes as transactional SQL statements keyed by version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -235,6 +235,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         # Existing non-empty values are known to have been received; empty legacy
         # values are ambiguous, so leave them unavailable and prevent false matches.
         "UPDATE active_alerts SET status_information_available = 1 WHERE status_information <> ''",
+    ),
+    7: (
+        # Retain a minimal source tombstone so notification history can keep its
+        # source_id foreign key while all current monitoring state is removed.
+        "ALTER TABLE sources ADD COLUMN deleted_at TEXT",
+        "CREATE INDEX idx_sources_deleted_source_peer ON sources(deleted_at, source_name, peer_ip)",
     ),
 }
 

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from app.db import MIGRATIONS
+from app.db import MIGRATIONS, connect, initialize
 from app.main import create_app
 
 
@@ -364,6 +364,169 @@ def test_offline_source_retains_last_known_alert_and_history(app_factory):
         current = client.get("/api/v1/alerts").json()["items"]
         assert len(current) == 1 and current[0]["stale"] is True
         assert [item["event"] for item in client.get("/api/v1/history").json()["items"]] == ["opened"]
+
+
+def test_source_inactivity_has_separate_configurable_threshold(app_factory):
+    app = app_factory(offline_after_seconds=900, source_inactive_after_seconds=86400)
+    with TestClient(app) as client:
+        assert client.post("/api/v1/ingest", json=snapshot([alert()])).status_code == 202
+        source = client.get("/api/v1/sources").json()
+        item = source["items"][0]
+        assert source["inactive_after_seconds"] == 86400
+        assert item["inactive"] is False
+        assert item["last_received_at"]
+
+        with connect(app.state.settings.database_path) as db:
+            old = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat().replace("+00:00", "Z")
+            db.execute("UPDATE sources SET last_received_at = ? WHERE id = ?", (old, item["id"]))
+        source = client.get("/api/v1/sources").json()["items"][0]
+        assert source["offline"] is True
+        assert source["inactive"] is True
+        # Silence marks data stale; it does not remove current state.
+        assert client.get("/api/v1/statuses").json()["total"] == 1
+
+
+def test_active_source_cannot_be_manually_removed(app_factory):
+    app = app_factory(source_inactive_after_seconds=86400)
+    with TestClient(app) as client:
+        client.post("/api/v1/ingest", json=snapshot([alert()]))
+        source = client.get("/api/v1/sources").json()["items"][0]
+        response = client.delete(f"/api/v1/sources/{source['id']}")
+        assert response.status_code == 409
+        assert client.get("/api/v1/sources").json()["items"][0]["id"] == source["id"]
+        assert client.get("/api/v1/alerts").json()["total"] == 1
+
+
+def test_removing_inactive_source_preserves_notification_history_and_reconnects(app_factory):
+    app = app_factory(source_inactive_after_seconds=86400)
+    with TestClient(app, client=("10.0.0.10", 5000)) as old_peer, \
+         TestClient(app, client=("10.0.0.11", 5000)) as other_peer:
+        body = snapshot([alert()])
+        body["ok_statuses"] = [ok_status(host="web01", service="http")]
+        old_peer.post("/api/v1/ingest", json=body)
+        other_peer.post("/api/v1/ingest", json=body)
+        old_source, other_source = old_peer.get("/api/v1/sources").json()["items"]
+        assert old_source["peer_ip"] == "10.0.0.10"
+        assert other_source["peer_ip"] == "10.0.0.11"
+
+        with connect(app.state.settings.database_path) as db:
+            expired = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat().replace("+00:00", "Z")
+            db.execute("UPDATE sources SET last_received_at = ? WHERE id = ?", (expired, old_source["id"]))
+            rule_id = db.execute(
+                """INSERT INTO notification_rules
+                   (name, enabled, conditions_json, events_json, subject_template, body_template, created_at, updated_at)
+                   VALUES ('preserved-rule', 0, '{}', '[]', 'subject', 'body', ?, ?)""",
+                (expired, expired),
+            ).lastrowid
+            channel_id = db.execute(
+                """INSERT INTO notification_channels
+                   (name, provider, config_json, enabled, timeout_seconds, rate_limit_seconds, created_at, updated_at)
+                   VALUES ('preserved-channel', 'webhook', '{}', 0, 10, 1, ?, ?)""",
+                (expired, expired),
+            ).lastrowid
+            for event_id, revision, event_type, status in (
+                ("history-sent", 1, "opened", "sent"),
+                ("history-pending", 2, "state_changed", "pending"),
+            ):
+                db.execute(
+                    """INSERT INTO notification_events
+                       (id, source_id, server, backend, type, host, service, episode_id, revision,
+                        event_type, state, old_state, occurred_at, payload_json)
+                       VALUES (?, ?, 'Thruk oficina', 'alpha', 'service', 'db01', 'disk', 'episode', ?, ?, 'CRITICAL', NULL, ?, '{}')""",
+                    (event_id, old_source["id"], revision, event_type, expired),
+                )
+                delivery_id = db.execute(
+                    """INSERT INTO notification_deliveries
+                       (event_id, rule_id, rule_name, channel_id, channel_name, provider, status,
+                        attempt_count, max_attempts, next_attempt_at, created_at, updated_at)
+                       VALUES (?, ?, 'preserved-rule', ?, 'preserved-channel', 'webhook', ?, 0, 5, ?, ?, ?)""",
+                    (event_id, rule_id, channel_id, status, expired, expired, expired),
+                ).lastrowid
+                if status == "sent":
+                    db.execute(
+                        """INSERT INTO notification_attempts
+                           (delivery_id, attempt_number, attempted_at, finished_at, outcome,
+                            http_status, error, duration_ms)
+                           VALUES (?, 1, ?, ?, 'sent', 200, NULL, 25)""",
+                        (delivery_id, expired, expired),
+                    )
+
+        old_source_after = next(
+            item for item in old_peer.get("/api/v1/sources").json()["items"] if item["id"] == old_source["id"]
+        )
+        assert old_source_after["inactive"] is True
+        removed = old_peer.delete(f"/api/v1/sources/{old_source['id']}")
+        assert removed.status_code == 200
+        assert removed.json() == {"deleted": True, "source_id": old_source["id"], "reconnectable": True}
+
+        sources = old_peer.get("/api/v1/sources").json()["items"]
+        assert [item["id"] for item in sources] == [other_source["id"]]
+        assert old_peer.get("/api/v1/stats").json()["sources"]["total"] == 1
+        statuses = old_peer.get("/api/v1/statuses").json()["items"]
+        assert len(statuses) == 2
+        assert {item["source_id"] for item in statuses} == {other_source["id"]}
+        alerts = old_peer.get("/api/v1/alerts").json()["items"]
+        assert len(alerts) == 1 and alerts[0]["source_id"] == other_source["id"]
+        assert old_peer.get("/api/v1/history").json()["total"] == 1
+
+        notification_history = old_peer.get("/api/v1/notifications/history").json()
+        assert notification_history["total"] == 2
+        assert {item["status"] for item in notification_history["items"]} == {"sent", "cancelled"}
+        with connect(app.state.settings.database_path) as db:
+            tombstone = db.execute(
+                "SELECT deleted_at, complete, snapshot_revision, last_received_at FROM sources WHERE id = ?",
+                (old_source["id"],),
+            ).fetchone()
+            assert tombstone["deleted_at"]
+            assert tombstone["complete"] == tombstone["snapshot_revision"] == 0
+            assert tombstone["last_received_at"] != expired
+            assert db.execute("SELECT COUNT(*) FROM active_alerts WHERE source_id = ?", (old_source["id"],)).fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM monitored_statuses WHERE source_id = ?", (old_source["id"],)).fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM latest_snapshots WHERE source_id = ?", (old_source["id"],)).fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM notification_rules").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM notification_channels").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM notification_attempts").fetchone()[0] == 1
+
+        # A valid snapshot after removal starts a clean current view even if its
+        # payload timestamp predates the tombstone's former snapshot.
+        assert old_peer.post("/api/v1/ingest", json=body).status_code == 202
+        reconnected = old_peer.get("/api/v1/sources").json()["items"]
+        restored = next(item for item in reconnected if item["id"] == old_source["id"])
+        assert restored["inactive"] is False
+        assert old_peer.get("/api/v1/statuses").json()["total"] == 4
+        with connect(app.state.settings.database_path) as db:
+            assert db.execute("SELECT snapshot_revision FROM sources WHERE id = ?", (old_source["id"],)).fetchone()[0] == 1
+
+
+def test_schema_v6_migration_adds_source_tombstone_without_losing_notification_events(tmp_path):
+    database_path = tmp_path / "schema-v6.sqlite3"
+    with connect(database_path) as db:
+        db.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        for version in range(1, 7):
+            for statement in MIGRATIONS[version]:
+                db.execute(statement)
+            db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        source_id = db.execute(
+            """INSERT INTO sources
+               (source_name, peer_ip, first_received_at, last_received_at, payload_timestamp, complete)
+               VALUES ('NaftaMon', '127.0.0.1', ?, ?, ?, 1)""",
+            (now, now, now),
+        ).lastrowid
+        db.execute(
+            """INSERT INTO notification_events
+               (id, source_id, server, backend, type, host, service, episode_id, revision,
+                event_type, state, occurred_at, payload_json)
+               VALUES ('legacy-event', ?, 'Thruk', 'alpha', 'service', 'db01', 'disk', 'episode', 1,
+                       'opened', 'CRITICAL', ?, '{}')""",
+            (source_id, now),
+        )
+
+    initialize(database_path)
+    with connect(database_path) as db:
+        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert db.execute("SELECT id FROM notification_events WHERE id='legacy-event'").fetchone()[0] == "legacy-event"
+        assert "deleted_at" in {row["name"] for row in db.execute("PRAGMA table_info(sources)")}
 
 
 def test_database_survives_app_recreation_and_filters_are_parameterized(tmp_path):

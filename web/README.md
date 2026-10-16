@@ -22,7 +22,7 @@ La tabla muestra fuente provisional (nombre e IP peer), servidor, backend, host,
 
 El dashboard consulta APIs del mismo origen mediante polling HTTP. El intervalo inicial es 5 segundos y se puede cambiar a 10, 15, 30 o 60 segundos desde la barra superior; esa preferencia se conserva en el navegador. El dashboard recorre las páginas de alertas del backend en lotes de hasta 500, sin truncar la lista por el límite de una página. Los filtros, el orden y la página actual se mantienen durante cada actualización. El selector de tema claro/oscuro también se guarda localmente.
 
-La pestaña **Historial de cambios** muestra aperturas, cambios de estado/atributos y recuperaciones que el backend observó en snapshots. No puede mostrar cambios transitorios que ocurrieron entre dos recepciones. La sección **Fuentes de información** muestra la antigüedad de cada webhook y el estado de cada servidor Thruk por separado. Los mensajes manuales `type: test` no crean fuentes.
+La pestaña **Historial de cambios** muestra aperturas, cambios de estado/atributos y recuperaciones que el backend observó en snapshots. No puede mostrar cambios transitorios que ocurrieron entre dos recepciones. La sección **Fuentes de información** muestra la antigüedad de cada webhook, conectividad y estado de cada servidor Thruk. Una fuente se considera inactiva tras `SOURCE_INACTIVE_AFTER_SECONDS` (24 horas por defecto); no se elimina automáticamente. El botón **Eliminar fuente inactiva** aparece solo al superar ese umbral y el backend vuelve a comprobarlo. La confirmación elimina sus snapshots, alertas, estados e historial de cambios de monitoreo. Conserva el historial de notificaciones, cancela entregas pendientes o en curso y mantiene las reglas y destinos. Una solicitud HTTP ya enviada al proveedor no se puede retirar y su resultado puede no registrarse como enviado. Si el mismo emisor vuelve a enviar un snapshot válido, reaparece con datos actuales. Los mensajes manuales `type: test` no crean fuentes.
 
 ## Ejecutar
 
@@ -106,6 +106,7 @@ Estas reglas aplican al backend iptables de Docker; no son persistentes en todas
 | `WEB_PORT` | `8080` | Puerto del host publicado por Compose. |
 | `BIND_ADDRESS` | `127.0.0.1` | Dirección del host donde Docker publica el puerto. Elige una IP LAN privada para recibir conexiones remotas. |
 | `OFFLINE_AFTER_SECONDS` | `900` | Segundos desde la última recepción antes de marcar una fuente offline. Configúralo por encima del intervalo del Gateway; ese intervalo no viaja en el JSON. |
+| `SOURCE_INACTIVE_AFTER_SECONDS` | `86400` | Segundos sin snapshots para permitir eliminar manualmente una fuente. No purga datos automáticamente y se mantiene separado del umbral offline. |
 | `MAX_REQUEST_BYTES` | `8388608` | Tamaño máximo del POST (8 MiB). |
 | `HISTORY_RETENTION_DAYS` | `90` | Retención del historial de cambios. `0` desactiva la limpieza automática. |
 | `NOTIFICATION_ALLOWED_DESTINATION_CIDRS` | vacío | Rangos privados permitidos para destinos Gotify, ntfy o webhook; usa un CIDR LAN concreto, por ejemplo `192.168.1.0/24`. |
@@ -138,6 +139,7 @@ Todas las rutas son mismo origen, no requieren autenticación y devuelven JSON:
 | `GET /api/v1/statuses` | Todos los estados actuales: alertas activas más objetos UP recibidos en `ok_statuses[]`; incluye `status_information`, `stale` y filtros por fuente/servidor/backend/host/servicio/estado/tipo. |
 | `GET /api/v1/stats` | Total de alertas, agrupación por estado y fuentes online/offline. |
 | `GET /api/v1/sources` | Última recepción, frescura y estado de consultas por servidor. |
+| `DELETE /api/v1/sources/{source_id}` | Retira manualmente una fuente inactiva y sus datos actuales de monitoreo. No requiere autenticación; limita el puerto a una LAN confiable. |
 | `GET /api/v1/history` | Transiciones observadas; filtros `source_id`, `server`, `limit`, `offset`. |
 | `GET /healthz` | Salud del proceso y comprobación SQLite. |
 
@@ -265,7 +267,7 @@ Descarga o cambia al código de la versión que vas a desplegar, haz una copia d
 
 ## Seguridad y límites operativos
 
-El requisito de esta versión es no tener autenticación: cualquier cliente que alcance el puerto puede leer alertas, enviar snapshots falsos, modificar reglas y destinos, y solicitar envíos de prueba. Úsala solo en una LAN confiable o VPN, no la publiques en Internet y limita el acceso desde el firewall del host y la segmentación de red. CORS no autentica clientes ni sustituye estas restricciones. El Gateway no incluye credenciales de Thruk en su JSON; el backend no registra cuerpos y nunca ejecuta los valores recibidos. SQL usa parámetros y el frontend inserta datos como texto. Los destinos de notificación pueden transportar datos de infraestructura fuera de la LAN si el operador los configura; revísalos antes de habilitarlos.
+El requisito de esta versión es no tener autenticación: cualquier cliente que alcance el puerto puede leer alertas, enviar snapshots falsos, modificar reglas y destinos, solicitar envíos de prueba y retirar fuentes inactivas. Úsala solo en una LAN confiable o VPN, no la publiques en Internet y limita el acceso desde el firewall del host y la segmentación de red. CORS no autentica clientes ni sustituye estas restricciones. El Gateway no incluye credenciales de Thruk en su JSON; el backend no registra cuerpos y nunca ejecuta los valores recibidos. SQL usa parámetros y el frontend inserta datos como texto. Los destinos de notificación pueden transportar datos de infraestructura fuera de la LAN si el operador los configura; revísalos antes de habilitarlos.
 
 La identidad del emisor sigue siendo provisional (`source` + IP observada); conexiones compartidas por NAT o proxy se mezclan. La validación física entre dos computadoras y el despliegue en Docker Engine Linux dependen de la red y firewall del host; en esta entrega se verificaron Docker Desktop en Windows 11 y dos emisores dentro de contenedores aislados.
 

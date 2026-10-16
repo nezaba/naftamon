@@ -251,7 +251,7 @@ def accept_snapshot(
         db.execute("BEGIN IMMEDIATE")
         received_at = iso_utc()
         row = db.execute(
-            "SELECT id, snapshot_revision, payload_timestamp FROM sources WHERE source_name = ? AND peer_ip = ?",
+            "SELECT id, snapshot_revision, payload_timestamp, deleted_at FROM sources WHERE source_name = ? AND peer_ip = ?",
             (snapshot.source, peer_ip),
         ).fetchone()
         if row is None:
@@ -265,7 +265,17 @@ def accept_snapshot(
             source_revision = 1
         else:
             source_id = row["id"]
-            if _payload_is_older(snapshot.timestamp, row["payload_timestamp"]):
+            if row["deleted_at"] is not None:
+                # A manually removed source is a tombstone for notification-history
+                # foreign keys only. Its next valid snapshot starts a fresh monitor.
+                source_revision = 1
+                db.execute(
+                    """UPDATE sources SET first_received_at = ?, last_received_at = ?,
+                       payload_timestamp = ?, complete = ?, snapshot_revision = ?, deleted_at = NULL
+                       WHERE id = ?""",
+                    (received_at, received_at, snapshot.timestamp, int(snapshot.complete), source_revision, source_id),
+                )
+            elif _payload_is_older(snapshot.timestamp, row["payload_timestamp"]):
                 # A delayed webhook must not roll back the latest snapshot or any
                 # per-server state. Receipt time still reflects observed traffic.
                 db.execute("UPDATE sources SET last_received_at = ? WHERE id = ?", (received_at, source_id))
@@ -274,12 +284,13 @@ def accept_snapshot(
                     "received_at": received_at, "complete": snapshot.complete,
                     "content_hash": content_hash, "stale_snapshot": True,
                 }
-            source_revision = row["snapshot_revision"] + 1
-            db.execute(
-                """UPDATE sources SET last_received_at = ?, payload_timestamp = ?, complete = ?,
-                   snapshot_revision = ? WHERE id = ?""",
-                (received_at, snapshot.timestamp, int(snapshot.complete), source_revision, source_id),
-            )
+            else:
+                source_revision = row["snapshot_revision"] + 1
+                db.execute(
+                    """UPDATE sources SET last_received_at = ?, payload_timestamp = ?, complete = ?,
+                       snapshot_revision = ? WHERE id = ?""",
+                    (received_at, snapshot.timestamp, int(snapshot.complete), source_revision, source_id),
+                )
 
         db.execute(
             """INSERT INTO latest_snapshots

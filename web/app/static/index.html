@@ -7,8 +7,8 @@
   <meta name="theme-color" content="#101821">
   <title>NaftaMon Web — Monitoreo</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.ico">
-  <link rel="stylesheet" href="/static/dashboard.css?v=monitoring-page-size-20261016">
-  <script src="/static/dashboard.js?v=monitoring-page-size-20261016" defer></script>
+  <link rel="stylesheet" href="/static/dashboard.css?v=source-cleanup-20261016">
+  <script src="/static/dashboard.js?v=source-cleanup-20261016" defer></script>
   <script src="/static/notifications.js" defer></script>
 </head>
 <body>
@@ -153,7 +153,7 @@
     </section>
 
     <section class="sources-section" aria-labelledby="sources-title">
-      <div class="section-heading"><div><h2 id="sources-title">Fuentes de información</h2><p class="section-subtitle">Conectividad del emisor y estado de cada servidor Thruk</p></div><span id="source-count-label" class="section-meta">0 fuentes</span></div>
+      <div class="section-heading"><div><h2 id="sources-title">Fuentes de información</h2><p class="section-subtitle">Última recepción, conectividad y actividad del emisor. Las fuentes inactivas no se eliminan automáticamente.</p></div><span id="source-count-label" class="section-meta">0 fuentes</span></div>
       <div class="sources-grid" id="sources-grid"></div>
       <div class="sources-empty" id="sources-empty" hidden>Sin fuentes registradas. Los mensajes de prueba no crean fuentes.</div>
     </section>
@@ -263,6 +263,12 @@
   <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
     <div class="dialog-heading"><div><p class="eyebrow">CONFIRMAR ACCIÓN</p><h2 id="confirm-title">¿Continuar?</h2></div><button class="dialog-close" type="button" data-close-dialog="confirm-dialog" aria-label="Cerrar">×</button></div>
     <div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button class="secondary-action" type="button" data-close-dialog="confirm-dialog">Cancelar</button><button class="danger-action" id="confirm-accept" type="button">Eliminar</button></div>
+  </dialog>
+
+  <dialog class="confirm-dialog source-delete-dialog" id="source-delete-dialog" aria-labelledby="source-delete-title">
+    <div class="dialog-heading"><div><p class="eyebrow">FUENTE INACTIVA</p><h2 id="source-delete-title">Eliminar fuente</h2></div><button class="dialog-close" id="source-delete-close" type="button" aria-label="Cerrar">×</button></div>
+    <div class="dialog-body"><p id="source-delete-message"></p><p class="source-delete-warning">Se quitarán sus hosts, servicios, estados actuales e historial de cambios. El historial de notificaciones se conserva; las entregas pendientes o en curso se marcan canceladas. Un POST que ya salió hacia el proveedor no se puede retirar. Si vuelve a enviar datos válidos, la fuente reaparecerá.</p><p id="source-delete-error" class="source-delete-error" role="alert" hidden></p></div>
+    <div class="dialog-footer"><button class="secondary-action" id="source-delete-cancel" type="button">Cancelar</button><button class="danger-action" id="source-delete-accept" type="button">Eliminar fuente</button></div>
   </dialog>
 </body>
 </html>

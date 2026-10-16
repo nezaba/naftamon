@@ -6,8 +6,8 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Estado de infraestructura" in response.text
-    assert 'href="/static/dashboard.css?v=monitoring-page-size-20261016"' in response.text
-    assert 'src="/static/dashboard.js?v=monitoring-page-size-20261016"' in response.text
+    assert 'href="/static/dashboard.css?v=source-cleanup-20261016"' in response.text
+    assert 'src="/static/dashboard.js?v=source-cleanup-20261016"' in response.text
     assert not re.search(r'(?:src|href)=["\']https?://', response.text, re.IGNORECASE)
     assert 'id="login"' not in response.text.lower()
     assert not re.search(r'<form[^>]+(?:login|auth)', response.text, re.IGNORECASE)
@@ -42,6 +42,34 @@ def test_dashboard_exposes_real_contract_fields_filters_and_history(client):
     for real_field in ("acknowledged", "downtime", "last_seen_at"):
         assert real_field in script
     assert 'id="sources-grid"' in response.text
+
+
+def test_source_cards_offer_confirmed_manual_removal_for_inactive_sources(client):
+    page = client.get("/").text
+    assert "no se eliminan automáticamente" in page
+    assert 'id="source-delete-dialog"' in page
+    assert 'id="source-delete-accept"' in page
+    assert 'id="source-delete-cancel"' in page
+    assert "historial de notificaciones se conserva" in page
+    assert "POST que ya salió hacia el proveedor no se puede retirar" in page
+    assert "vuelve a enviar datos válidos" in page
+
+    script = client.get("/static/dashboard.js").text
+    for expected in (
+        "inactive_after_seconds", "function sourceIsInactive", "sourceIsInactive(source)",
+        'fetch(`/api/v1/sources/${sourceId}`, { method: "DELETE"',
+        'if (state.refreshing) { state.refreshPending = true; return; }',
+    ):
+        assert expected in script
+
+    source = client.post("/api/v1/ingest", json={
+        "timestamp": "2026-10-14T22:00:00.000Z", "source": "NaftaMon", "complete": True,
+        "servers": [{"server": "Thruk oficina", "status": "ok"}], "alerts": [],
+    })
+    assert source.status_code == 202
+    sources = client.get("/api/v1/sources").json()
+    assert sources["inactive_after_seconds"] == 86400
+    assert sources["items"][0]["inactive"] is False
 
 
 def test_monitoring_table_exposes_status_information_and_searches_it_safely(client):

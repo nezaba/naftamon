@@ -14,6 +14,7 @@ Restricciones de esta versión:
 - El receptor público de esta etapa es `POST /api/v1/ingest`, sin credenciales ni headers obligatorios.
 - Como el JSON no identifica una instalación, se agrupa provisionalmente por `source` y la IP observada del peer TCP. Es una heurística débil, no autenticación; no confiar en `X-Forwarded-For` ni en la IP para seguridad.
 - Publicar solo en loopback o IP privada escogida, y restringir Windows Firewall a red confiable.
+- La eliminación manual de fuentes no tiene autenticación de aplicación en esta versión; no publicar su API fuera de una LAN confiable y limitar el puerto con el firewall del host.
 
 Skills locales:
 

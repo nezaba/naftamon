@@ -61,7 +61,7 @@ complete de raíz representa completitud de consultas Thruk, no conectividad del
 
 | Tabla | Clave y propósito |
 | --- | --- |
-| sources | ID local, valor source recibido, IP observada del peer como agrupador provisional, primera/última recepción, último timestamp de payload, completitud del último snapshot y revisión local monotónica por recepción. No hay columna instance_id en el contrato actual; si Desktop la incorpora, se añadirá con una migración. Frescura derivada de last_received_at y umbral local configurable. Los mensajes test no crean/actualizan una fuente ni su frescura. |
+| sources | ID local, valor source recibido, IP observada del peer como agrupador provisional, primera/última recepción, último timestamp de payload, completitud del último snapshot y revisión local monotónica por recepción. `deleted_at` marca una fuente retirada manualmente; la fila tombstone conserva la referencia `source_id` del historial de notificaciones. No hay columna instance_id en el contrato actual; si Desktop la incorpora, se añadirá con una migración. Frescura derivada de last_received_at y umbral local configurable. Los mensajes test no crean/actualizan una fuente ni su frescura. |
 | latest_snapshots | Un registro por source_id con JSON periódico más reciente, timestamp del Gateway, received_at, complete y hash canónico. Tests no reemplazan este registro. No guardar una fila por cada intervalo idéntico. |
 | monitored_servers | Una fila por source_id + server; último estado ok/error/pending, última recepción de estado, última consulta ok y revisión local del snapshot que confirmó ese estado. El Gateway no expone detalle del error. |
 | active_alerts | Una fila por source_id + server + backend + type + host + service. Guarda campos de alerta, `status_information`, first_seen_at y last_seen_at; `stale` se deriva del estado del servidor y la frescura de fuente. No usar state como parte de la clave. |
@@ -96,6 +96,7 @@ No hay autenticación en dashboard, receptor ni APIs. Las rutas usan mismo orige
 | POST /api/v1/ingest | Recibir test o snapshot. Sin autenticación; agrupación provisional por source + peer IP observada. |
 | GET /api/v1/stats | Totales de alertas, agrupación por estado y fuentes online/offline. |
 | GET /api/v1/sources | Fuentes, última recepción y estado de sus servidores. |
+| DELETE /api/v1/sources/{source_id} | Retirar manualmente una fuente que superó `SOURCE_INACTIVE_AFTER_SECONDS`; borra su snapshot, estados y datos actuales de monitoreo. No requiere autenticación. |
 | GET /api/v1/alerts | Alertas actuales; filtros opcionales por source_id, server, state, type y stale, más paginación. |
 | GET /api/v1/statuses | Estados de monitoreo actuales (alertas más estados UP de `ok_statuses[]`); filtros por source_id, server, backend, host, service, state y type, más paginación. Incluye `status_information` y `stale`. |
 | GET /api/v1/history | Transiciones observadas; filtros por source_id/server y límite de paginación. |
@@ -106,6 +107,12 @@ La UI local se sirve desde `/static/dashboard.css` y `/static/dashboard.js`. Con
 Las estadísticas de severidad se calculan a partir de los registros no UP obtenidos de la API paginada y la disponibilidad del emisor se deriva de `last_received_at`/`age_seconds` en `/api/v1/sources`. Así se evitan diferencias temporales entre conteos de solicitudes separadas a `/api/v1/stats`. Una condición sin alertas solo se presenta como saludable si cada fuente está dentro del umbral y su snapshot es completo con servidores `ok`. Estados parciales, fallidos, stale u offline se indican por separado.
 
 Respuestas de POST sugeridas: 202 tras aceptar y persistir; 400 JSON/estructura inválida; 413 cuerpo demasiado grande; 415 tipo de contenido no soportado. Límite inicial sugerido: 8 MiB configurable.
+
+### Retiro manual de fuentes
+
+`OFFLINE_AFTER_SECONDS` conserva el criterio actual de conectividad/stale. `SOURCE_INACTIVE_AFTER_SECONDS` es un umbral separado (86400 por defecto) que habilita el retiro manual; no existe purga automática. El backend responde 409 si la fuente recibió datos dentro del umbral. El retiro borra sus estados actuales, snapshots e historial de cambios y marca canceladas sus entregas pendientes o en curso. Conserva el historial de notificaciones y reglas/destinos. Una solicitud HTTP ya enviada al proveedor no se puede retirar y su resultado puede no registrarse como enviado. Se mantiene una fila tombstone mínima para conservar las referencias de `source_id` del historial; el próximo snapshot válido del mismo `source + peer IP` la reactiva y empieza una observación limpia.
+
+El dashboard y la API no tienen autenticación. Cualquier cliente que alcance el puerto puede invocar la eliminación. Publica el servicio solo en loopback o una IP privada de confianza y restringe Windows Defender Firewall a los equipos/subredes necesarios. El botón y el diálogo de confirmación no sustituyen al firewall.
 
 ## Docker Compose y red
 
