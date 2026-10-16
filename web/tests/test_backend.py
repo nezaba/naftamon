@@ -4,6 +4,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -40,6 +41,30 @@ def snapshot(alerts=None, *, timestamp="2026-10-14T22:00:00.000Z", complete=True
     return {"timestamp": timestamp, "source": source, "complete": complete, "servers": servers, "alerts": alerts or []}
 
 
+def snapshot_v2(alerts=None, *, timestamp="2026-10-16T12:00:00.000Z", source_id=None,
+                snapshot_id=None, complete=True, servers=None):
+    alerts = alerts or []
+    for item in alerts:
+        item.setdefault("visible_in_desktop", True)
+    if servers is None:
+        servers = [{"server": "Thruk oficina", "status": "ok"}]
+    raw_counts = {}
+    visible_counts = {}
+    for item in alerts:
+        raw_counts[item["state"]] = raw_counts.get(item["state"], 0) + 1
+        if item["visible_in_desktop"]:
+            visible_counts[item["state"]] = visible_counts.get(item["state"], 0) + 1
+    return {
+        "schema_version": 2, "timestamp": timestamp, "source": "NaftaMon",
+        "source_id": source_id or str(uuid4()), "snapshot_id": snapshot_id or str(uuid4()),
+        "complete": complete, "servers": servers, "alerts": alerts,
+        "summary": {
+            "raw": {"total": len(alerts), "by_state": raw_counts},
+            "visible": {"total": sum(item["visible_in_desktop"] for item in alerts), "by_state": visible_counts},
+        },
+    }
+
+
 def test_valid_webhook_and_unauthenticated_read_apis(client):
     body = json.dumps(snapshot([alert()])).encode("utf-8")
     response = client.post(
@@ -59,6 +84,77 @@ def test_valid_webhook_and_unauthenticated_read_apis(client):
     assert client.get("/api/v1/stats").json()["alerts"]["total"] == 1
     assert client.get("/api/v1/history").json()["items"][0]["event"] == "opened"
     assert client.get("/healthz").json() == {"status": "ok", "database": "ok"}
+
+
+def test_v2_visibility_is_not_a_transition_and_snapshot_ids_are_idempotent(client):
+    emitter = str(uuid4())
+    old = snapshot([alert("CRITICAL", host="same-host", service="same-service", status_information="café ✓")])
+    old["ok_statuses"] = [ok_status(host="healthy-before-upgrade")]
+    assert client.post("/api/v1/ingest", json=old).status_code == 202
+    current = snapshot_v2([
+        alert("CRITICAL", host="same-host", service="same-service", status_information="café ✓"),
+        alert("WARNING", host="hidden-host", service="cpu", visible_in_desktop=False),
+    ], source_id=emitter)
+    first = client.post("/api/v1/ingest", json=current)
+    assert first.status_code == 202
+    assert first.json()["duplicate_snapshot"] is False
+    assert client.get("/api/v1/statuses", params={"view": "desktop"}).json()["total"] == 1
+    assert client.get("/api/v1/statuses", params={"view": "all"}).json()["total"] == 2
+    assert client.get("/api/v1/statuses", params={"state": "UP", "view": "all"}).json()["total"] == 0
+
+    db_path = client.app.state.settings.database_path
+    with connect(db_path) as db:
+        history_before = db.execute("SELECT COUNT(*) FROM alert_history").fetchone()[0]
+        events_before = db.execute("SELECT COUNT(*) FROM notification_events").fetchone()[0]
+        up_rows = db.execute("SELECT COUNT(*) FROM monitored_statuses").fetchone()[0]
+        assert up_rows == 0
+        assert db.execute("SELECT client_source_id FROM sources").fetchone()[0] == emitter
+
+    duplicate = client.post("/api/v1/ingest", json=current)
+    assert duplicate.status_code == 202 and duplicate.json()["duplicate_snapshot"] is True
+    assert client.get("/api/v1/stats").json()["monitoring_revision"] == first.json().get("monitoring_revision", 2)
+    conflict = json.loads(json.dumps(current))
+    conflict["alerts"][0]["status_information"] = "different content"
+    conflict["snapshot_id"] = current["snapshot_id"]
+    assert client.post("/api/v1/ingest", json=conflict).status_code == 409
+
+    changed_visibility = snapshot_v2([
+        alert("CRITICAL", host="same-host", service="same-service", status_information="café ✓",
+              visible_in_desktop=False),
+        alert("WARNING", host="hidden-host", service="cpu", visible_in_desktop=True),
+    ], source_id=emitter, timestamp="2026-10-16T12:01:00.000Z")
+    assert client.post("/api/v1/ingest", json=changed_visibility).status_code == 202
+    assert client.get("/api/v1/statuses", params={"view": "desktop"}).json()["total"] == 1
+    with connect(db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM alert_history").fetchone()[0] == history_before
+        assert db.execute("SELECT COUNT(*) FROM notification_events").fetchone()[0] == events_before
+        assert db.execute("SELECT COUNT(*) FROM active_alerts").fetchone()[0] == 2
+
+    recovered = snapshot_v2([], source_id=emitter, timestamp="2026-10-16T12:02:00.000Z")
+    assert client.post("/api/v1/ingest", json=recovered).status_code == 202
+    with connect(db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM active_alerts").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM alert_history WHERE event = 'recovered'").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM notification_events WHERE event_type = 'recovered'").fetchone()[0] == 2
+
+
+def test_v2_emitters_with_same_peer_ip_remain_separate_and_stale_ids_do_not_roll_back(client):
+    one, two = str(uuid4()), str(uuid4())
+    payload_one = snapshot_v2([alert(host="duplicate-name", service="disk")], source_id=one)
+    payload_two = snapshot_v2([alert("WARNING", host="duplicate-name", service="disk")], source_id=two)
+    assert client.post("/api/v1/ingest", json=payload_one).status_code == 202
+    assert client.post("/api/v1/ingest", json=payload_two).status_code == 202
+    sources = client.get("/api/v1/sources").json()["items"]
+    assert len(sources) == 2
+    assert {source["client_source_id"] for source in sources} == {one, two}
+    assert client.get("/api/v1/statuses", params={"view": "all"}).json()["total"] == 2
+    latest = snapshot_v2([], source_id=one, timestamp="2026-10-16T12:10:00.000Z")
+    assert client.post("/api/v1/ingest", json=latest).status_code == 202
+    stale = snapshot_v2([alert("CRITICAL", host="duplicate-name", service="disk")],
+                        source_id=one, timestamp="2026-10-16T12:09:00.000Z")
+    assert client.post("/api/v1/ingest", json=stale).json()["stale_snapshot"] is True
+    statuses = client.get("/api/v1/statuses", params={"view": "all"}).json()["items"]
+    assert len(statuses) == 1 and statuses[0]["state"] == "WARNING"
 
 
 def test_alert_status_information_unicode_and_legacy_omission(client):
@@ -622,7 +718,7 @@ def test_schema_v6_migration_adds_source_tombstone_without_losing_notification_e
 
     initialize(database_path)
     with connect(database_path) as db:
-        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 12
+        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 13
         assert db.execute("SELECT id FROM notification_events WHERE id='legacy-event'").fetchone()[0] == "legacy-event"
         assert "deleted_at" in {row["name"] for row in db.execute("PRAGMA table_info(sources)")}
 

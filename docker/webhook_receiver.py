@@ -73,6 +73,11 @@ class Handler(BaseHTTPRequestHandler):
             if delay:
                 time.sleep(delay)
             rejected_fields = []
+            for field in ("schema_version", "source_id", "snapshot_id", "summary"):
+                if field in payload:
+                    rejected_fields.append(field)
+            if any("visible_in_desktop" in item for item in payload.get("alerts", [])):
+                rejected_fields.append("visible_in_desktop")
             if "ok_statuses" in payload:
                 rejected_fields.append("ok_statuses")
             if any("status_information" in item for item in payload.get("alerts", [])):
@@ -101,9 +106,14 @@ class Handler(BaseHTTPRequestHandler):
                     }
                     payload = {
                         "summary": True,
+                        "schema_version": payload.get("schema_version", 1),
+                        "source_id": payload.get("source_id"),
+                        "snapshot_id": payload.get("snapshot_id"),
                         "alerts": len(alerts),
                         "alert_states": dict(Counter(row.get("state") for row in alerts)),
                         "alert_types": dict(Counter(row.get("type") for row in alerts)),
+                        "raw_summary": payload.get("summary", {}).get("raw"),
+                        "visible_summary": payload.get("summary", {}).get("visible"),
                         "alert_acknowledged": sum(bool(row.get("acknowledged")) for row in alerts),
                         "alert_downtime": sum(bool(row.get("downtime")) for row in alerts),
                         "ok_statuses": len(statuses),

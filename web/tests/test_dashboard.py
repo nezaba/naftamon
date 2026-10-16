@@ -6,8 +6,8 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Estado de infraestructura" in response.text
-    assert 'href="/static/dashboard.css?v=scale-server-20261016"' in response.text
-    assert 'src="/static/dashboard.js?v=scale-server-20261016"' in response.text
+    assert 'href="/static/dashboard.css?v=sync-v2-20261016"' in response.text
+    assert 'src="/static/dashboard.js?v=sync-v2-20261016"' in response.text
     assert not re.search(r'(?:src|href)=["\']https?://', response.text, re.IGNORECASE)
     assert 'id="login"' not in response.text.lower()
     assert not re.search(r'<form[^>]+(?:login|auth)', response.text, re.IGNORECASE)
@@ -28,7 +28,9 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert "fetchAllStatuses" not in js.text
     assert "function statusQuery(offset, limit, revision = null)" in js.text
     assert "state.virtualChunkSize" in js.text
-    assert 'requestStatuses(offset, limit, state.pageSize === "all" ? state.virtualRevision : null)' in js.text
+    assert 'view: state.statusView' in js.text
+    assert 'monitoring-view' in response.text
+    assert 'requestStatuses(offset, limit, targetRevision)' in js.text
     assert "textContent" in js.text
     assert "innerHTML" not in js.text
 

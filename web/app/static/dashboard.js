@@ -6,7 +6,7 @@
   const state = {
     alerts: [], statuses: [], sources: [], backends: [], stats: null, offlineAfter: 900, inactiveAfter: 86400, historyItems: [], historyTotal: 0,
     pollMs: 5000, timer: null, refreshing: false, refreshPending: false, lastSuccess: null,
-    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50, filteredTotal: 0, virtualized: false, virtualTop: null, virtualBottom: null,
+    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50, statusView: "desktop", filteredTotal: 0, virtualized: false, virtualTop: null, virtualBottom: null,
     virtualChunks: new Map(), virtualPending: new Set(), virtualRevision: null, virtualOffset: 0, virtualStart: 0,
     virtualChunkSize: 500, statusQueryVersion: 0,
     historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(),
@@ -111,6 +111,7 @@
     const query = new URLSearchParams({
       limit: String(limit), offset: String(offset), sort: state.sort.key,
       direction: state.sort.direction === 1 ? "asc" : "desc",
+      view: state.statusView,
     });
     if (filter.host) query.set("host_query", filter.host);
     if (filter.service) query.set("service_query", filter.service);
@@ -156,17 +157,23 @@
       const offset = statusOffsetForView();
       const limit = state.pageSize === "all" ? state.virtualChunkSize : state.pageSize;
       const queryVersion = state.statusQueryVersion;
-      let statusResult;
-      try {
-        statusResult = await requestStatuses(offset, limit, state.pageSize === "all" ? state.virtualRevision : null);
-      } catch (error) {
-        if (error.status !== 409 || state.pageSize !== "all") throw error;
-        state.virtualChunks.clear(); state.virtualRevision = null;
-        statusResult = await requestStatuses(offset, limit);
-      }
-      const [health, sourceResult, statsResult] = await Promise.all([
-        getJSON("/healthz"), getJSON("/api/v1/sources"), getJSON("/api/v1/stats"),
+      const [health, sourceResult] = await Promise.all([
+        getJSON("/healthz"), getJSON("/api/v1/sources"),
       ]);
+      let statsResult, statusResult;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        statsResult = await getJSON("/api/v1/stats");
+        const targetRevision = Number(statsResult.monitoring_revision);
+        if (state.pageSize === "all" && state.virtualRevision !== targetRevision) {
+          state.virtualChunks.clear(); state.virtualRevision = targetRevision;
+        }
+        try {
+          statusResult = await requestStatuses(offset, limit, targetRevision);
+          break;
+        } catch (error) {
+          if (error.status !== 409 || attempt === 2) throw error;
+        }
+      }
       if (queryVersion !== state.statusQueryVersion) { state.refreshPending = true; return; }
       if (health.status !== "ok" || !Array.isArray(sourceResult.items) || !Array.isArray(statusResult.items)) throw new Error("El backend respondió con un estado no válido.");
       state.sources = sourceResult.items;
@@ -431,7 +438,7 @@
     return state.sources.length > 0 && state.sources.every((source) => !sourceIsOffline(source) && source.complete && Array.isArray(source.servers) && source.servers.length > 0 && source.servers.every((server) => server.status === "ok" && !server.stale && !server.removed));
   }
   function renderMetrics() {
-    const alerts = state.stats?.alerts || {};
+    const alerts = (state.statusView === "desktop" ? state.stats?.desktop_visible_alerts : state.stats?.alerts) || {};
     const byState = alerts.by_state || {};
     const byStateType = alerts.by_state_and_type || {};
     const critical = byState.CRITICAL || 0;
@@ -447,7 +454,8 @@
     setText("#metric-sources", `${online} / ${state.sources.length}`);
     setText("#metric-source-detail", `${state.sources.length - online} offline`);
     const staleCount = alerts.stale || 0;
-    setText("#metric-stale-note", staleCount ? `${staleCount} sin confirmar` : "En todos los servidores");
+    const scopeLabel = state.statusView === "desktop" ? "Vista visible en Desktop" : "Vista RAW de alertas";
+    setText("#metric-stale-note", `${scopeLabel} · ${staleCount ? `${staleCount} sin confirmar` : "sin estados obsoletos"}`);
     const latest = state.sources.map((source) => source.last_received_at).filter(Boolean).sort().at(-1);
     setText("#last-received", latest ? formatDate(latest) : "Sin recepciones");
     if (latest) {
@@ -677,6 +685,13 @@
     else { state.sort.key = key; state.sort.direction = 1; }
     applyServerFilters();
   });
+  $("#monitoring-view").addEventListener("change", (event) => {
+    if (!["desktop", "all"].includes(event.target.value)) return;
+    state.statusView = event.target.value;
+    storageSet("naftamon-monitor-view", state.statusView);
+    resetStatusQuery(); resetMonitoringPosition();
+    scheduleRefresh();
+  });
   $("#page-prev").addEventListener("click", () => { state.page = Math.max(0, state.page - 1); scheduleRefresh(); });
   $("#page-next").addEventListener("click", () => { state.page += 1; scheduleRefresh(); });
   $("#page-size").addEventListener("change", (event) => {
@@ -722,6 +737,11 @@
   if (["25", "50", "100", "250", "all"].includes(savedPageSize)) {
     state.pageSize = savedPageSize === "all" ? "all" : Number(savedPageSize);
     $("#page-size").value = savedPageSize;
+  }
+  const savedMonitoringView = storageGet("naftamon-monitor-view");
+  if (["desktop", "all"].includes(savedMonitoringView)) {
+    state.statusView = savedMonitoringView;
+    $("#monitoring-view").value = savedMonitoringView;
   }
   window.setInterval(renderAges, 1000);
   refresh().finally(restartPolling);

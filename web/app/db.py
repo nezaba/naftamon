@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Add future schema changes as transactional SQL statements keyed by version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -281,6 +281,45 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         # every status row just to advance a per-row timestamp on each poll.
         "ALTER TABLE monitored_servers ADD COLUMN status_data_revision INTEGER NOT NULL DEFAULT 0",
     ),
+    13: (
+        # A stable Desktop UUID separates emitters that share a LAN address.
+        # Legacy rows retain their former (source name, peer IP) identity.
+        """CREATE TABLE sources_v13 (
+            id INTEGER PRIMARY KEY,
+            source_name TEXT NOT NULL,
+            peer_ip TEXT NOT NULL,
+            first_received_at TEXT NOT NULL,
+            last_received_at TEXT NOT NULL,
+            payload_timestamp TEXT NOT NULL,
+            complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+            snapshot_revision INTEGER NOT NULL DEFAULT 0,
+            deleted_at TEXT,
+            client_source_id TEXT,
+            contract_version INTEGER NOT NULL DEFAULT 1
+        )""",
+        """INSERT INTO sources_v13
+           (id, source_name, peer_ip, first_received_at, last_received_at, payload_timestamp,
+            complete, snapshot_revision, deleted_at)
+           SELECT id, source_name, peer_ip, first_received_at, last_received_at, payload_timestamp,
+                  complete, snapshot_revision, deleted_at FROM sources""",
+        "DROP TABLE sources",
+        "ALTER TABLE sources_v13 RENAME TO sources",
+        "CREATE UNIQUE INDEX idx_sources_client_id ON sources(client_source_id) WHERE client_source_id IS NOT NULL",
+        "CREATE UNIQUE INDEX idx_sources_legacy_peer ON sources(source_name, peer_ip) WHERE client_source_id IS NULL",
+        "CREATE INDEX idx_sources_deleted_source_peer ON sources(deleted_at, source_name, peer_ip)",
+        "ALTER TABLE active_alerts ADD COLUMN visible_in_desktop INTEGER NOT NULL DEFAULT 1 CHECK (visible_in_desktop IN (0, 1))",
+        "ALTER TABLE latest_snapshots ADD COLUMN snapshot_id TEXT",
+        "ALTER TABLE latest_snapshots ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'",
+        """CREATE TABLE snapshot_receipts (
+            source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            snapshot_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            payload_timestamp TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            PRIMARY KEY (source_id, snapshot_id)
+        ) WITHOUT ROWID""",
+        "CREATE INDEX idx_snapshot_receipts_recent ON snapshot_receipts(source_id, received_at DESC)",
+    ),
 }
 
 
@@ -312,6 +351,9 @@ def _fold_search(value: str | None) -> str:
 def initialize(path: Path) -> None:
     with connect(path) as db:
         db.execute("PRAGMA journal_mode = WAL")
+        # Migration 13 rebuilds sources to replace its old global (name, peer)
+        # uniqueness rule while preserving dependent rows and their source IDs.
+        db.execute("PRAGMA foreign_keys = OFF")
         db.execute("BEGIN IMMEDIATE")
         db.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         current = db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] or 0
@@ -324,3 +366,8 @@ def initialize(path: Path) -> None:
             for statement in statements:
                 db.execute(statement)
             db.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
+        db.commit()
+        db.execute("PRAGMA foreign_keys = ON")
+        violations = db.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError("Database migration left foreign key violations")

@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from .db import SCHEMA_VERSION, _fold_search, connect, initialize
-from .ingest import accept_snapshot, iso_utc
+from .ingest import SnapshotIdConflict, accept_snapshot, iso_utc
 from .models import Snapshot, TestMessage
 from .notifications.api import router as notifications_router
 from .settings import Settings
@@ -161,6 +161,7 @@ def _alert_dict(row, stale: bool) -> dict[str, Any]:
         "last_check": row["last_check"],
         "last_change": row["last_change"],
         "status_information": row["status_information"],
+        "visible_in_desktop": _bool(row["visible_in_desktop"]),
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
         "stale": stale,
@@ -274,6 +275,8 @@ def create_app(
         except sqlite3.Error:
             # Do not leak local database details to an unauthenticated LAN client.
             return JSONResponse({"detail": "Snapshot could not be stored"}, status_code=503)
+        except SnapshotIdConflict as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
         finally:
             if streamed_ok_statuses is not None:
                 streamed_ok_statuses.close()
@@ -296,7 +299,7 @@ def create_app(
         inactive_threshold = app_settings.source_inactive_after_seconds
         with connect(app_settings.database_path) as db:
             sources = db.execute(
-                "SELECT * FROM sources WHERE deleted_at IS NULL ORDER BY source_name, peer_ip"
+                "SELECT * FROM sources WHERE deleted_at IS NULL ORDER BY source_name, peer_ip, id"
             ).fetchall()
             alert_counts = {
                 row["source_id"]: row["count"]
@@ -319,6 +322,8 @@ def create_app(
                 result.append(
                     {
                         "id": source["id"], "source": source["source_name"], "peer_ip": source["peer_ip"],
+                        "client_source_id": source["client_source_id"],
+                        "contract_version": source["contract_version"],
                         "first_received_at": source["first_received_at"], "last_received_at": source["last_received_at"],
                         "payload_timestamp": source["payload_timestamp"], "complete": _bool(source["complete"]),
                         "age_seconds": int(age), "offline": age > threshold,
@@ -445,34 +450,42 @@ def create_app(
         revision: int | None = Query(default=None, ge=0),
         sort: str = Query(default="state", pattern="^(source|peer_ip|server|backend|host|service|state|status_information|acknowledged|downtime|last_seen_at)$"),
         direction: str = Query(default="asc", pattern="^(asc|desc)$"),
+        # Keep the API's historical unfiltered contract for older clients;
+        # the dashboard explicitly requests its Desktop-visible default view.
+        view: str = Query(default="all", pattern="^(desktop|all)$"),
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ):
         """Return a filtered, server-paginated view of current monitoring states."""
-        union_query = f"""SELECT * FROM (
-            SELECT 'alert:' || a.id AS id, a.source_id, s.source_name AS source, s.peer_ip,
+        alert_query = f"""SELECT 'alert:' || a.id AS id, a.source_id, s.source_name AS source, s.peer_ip,
                    a.server, a.backend, a.host, a.service, a.type, a.state,
                    a.status_information, a.hard, a.acknowledged, a.downtime,
                    a.search_text, a.host_search, a.service_search,
+                   a.visible_in_desktop, 1 AS is_alert,
                    a.last_check, a.last_change, a.first_seen_at, a.last_seen_at,
                    {_stale_clause()} AS stale_flag
               FROM active_alerts a JOIN sources s ON s.id = a.source_id
-              JOIN monitored_servers ms ON ms.source_id = a.source_id AND ms.name = a.server
-            UNION ALL
-            SELECT 'status:' || m.id AS id, m.source_id, s.source_name AS source, s.peer_ip,
+              JOIN monitored_servers ms ON ms.source_id = a.source_id AND ms.name = a.server"""
+        status_query = f"""SELECT 'status:' || m.id AS id, m.source_id, s.source_name AS source, s.peer_ip,
                    m.server, m.backend, m.host, m.service, m.type, m.state,
                    m.status_information, m.hard, m.acknowledged, m.downtime,
                    m.search_text, m.host_search, m.service_search,
+                   1 AS visible_in_desktop, 0 AS is_alert,
                    m.last_check, m.last_change, m.first_seen_at,
                    CASE WHEN ms.status = 'ok' THEN ms.status_received_at ELSE COALESCE(ms.last_ok_at, m.last_seen_at) END AS last_seen_at,
                    CASE WHEN ((julianday('now') - julianday(s.last_received_at)) * 86400 > ?
                      OR ms.status != 'ok' OR ms.status_revision < s.snapshot_revision
                      OR ms.status_data_revision < s.snapshot_revision OR ms.removed = 1) THEN 1 ELSE 0 END AS stale_flag
               FROM monitored_statuses m JOIN sources s ON s.id = m.source_id
-              JOIN monitored_servers ms ON ms.source_id = m.source_id AND ms.name = m.server
-        )"""
+              JOIN monitored_servers ms ON ms.source_id = m.source_id AND ms.name = m.server"""
+        union_query = ("SELECT * FROM (" + alert_query + ")" if view == "desktop" else
+                       "SELECT * FROM (" + alert_query + " UNION ALL " + status_query + ")")
         conditions = []
-        params: list[Any] = [app_settings.offline_after_seconds, app_settings.offline_after_seconds]
+        params: list[Any] = [app_settings.offline_after_seconds]
+        if view == "desktop":
+            conditions.extend(("is_alert = 1", "visible_in_desktop = 1"))
+        else:
+            params.append(app_settings.offline_after_seconds)
         for column, value in (("source_id", source_id), ("server", server), ("backend", backend),
                               ("host", host), ("service", service), ("type", status_type)):
             if value is not None:
@@ -513,6 +526,7 @@ def create_app(
         sort_column = sort_columns[sort]
         sort_direction = direction.upper()
         with connect(app_settings.database_path) as db:
+            db.execute("BEGIN")
             if query:
                 source_matches = [
                     row[0] for row in db.execute(
@@ -551,6 +565,7 @@ def create_app(
     @app.get("/api/v1/stats")
     def stats():
         with connect(app_settings.database_path) as db:
+            db.execute("BEGIN")
             source_rows = db.execute(
                 "SELECT last_received_at FROM sources WHERE deleted_at IS NULL"
             ).fetchall()
@@ -561,8 +576,14 @@ def create_app(
                 if age <= app_settings.offline_after_seconds:
                     online_sources += 1
             counts = db.execute("SELECT state, COUNT(*) AS count FROM active_alerts GROUP BY state").fetchall()
+            visible_counts = db.execute(
+                "SELECT state, COUNT(*) AS count FROM active_alerts WHERE visible_in_desktop = 1 GROUP BY state"
+            ).fetchall()
             alert_types = db.execute(
                 "SELECT state, type, COUNT(*) AS count FROM active_alerts GROUP BY state, type"
+            ).fetchall()
+            visible_alert_types = db.execute(
+                "SELECT state, type, COUNT(*) AS count FROM active_alerts WHERE visible_in_desktop = 1 GROUP BY state, type"
             ).fetchall()
             affected_hosts = db.execute(
                 """SELECT COUNT(*) FROM (
@@ -585,6 +606,15 @@ def create_app(
                 " FROM active_alerts a JOIN sources s ON s.id=a.source_id JOIN monitored_servers ms ON ms.source_id=a.source_id AND ms.name=a.server",
                 [app_settings.offline_after_seconds],
             ).fetchone()
+            visible_alerts = db.execute(
+                """SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN """ + _stale_clause() + " THEN 1 ELSE 0 END) AS stale_count" +
+                " FROM active_alerts a JOIN sources s ON s.id=a.source_id JOIN monitored_servers ms ON ms.source_id=a.source_id AND ms.name=a.server WHERE a.visible_in_desktop = 1",
+                [app_settings.offline_after_seconds],
+            ).fetchone()
+            monitoring_revision = db.execute(
+                "SELECT value FROM app_state WHERE key = 'monitoring_revision'"
+            ).fetchone()[0]
         return {
             "sources": {"total": len(source_rows), "online": online_sources, "offline": len(source_rows) - online_sources},
             "alerts": {"total": all_alerts["total"], "stale": all_alerts["stale_count"] or 0,
@@ -593,6 +623,14 @@ def create_app(
                        "by_state_and_type": {
                            f"{row['state']}:{row['type']}": row["count"] for row in alert_types
                        }, "affected_hosts": affected_hosts},
+            "desktop_visible_alerts": {
+                "total": visible_alerts["total"], "stale": visible_alerts["stale_count"] or 0,
+                "by_state": {row["state"]: row["count"] for row in visible_counts},
+                "by_state_and_type": {
+                    f"{row['state']}:{row['type']}": row["count"] for row in visible_alert_types
+                }, "scope": "global_unfiltered_desktop_visible_active_alerts",
+            },
+            "monitoring_revision": monitoring_revision,
             "monitoring": {
                 "scope": "global_unfiltered_current_monitoring",
                 "total": sum(row["count"] for row in monitoring_counts),

@@ -7,8 +7,8 @@
   <meta name="theme-color" content="#101821">
   <title>NaftaMon Web — Monitoreo</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.ico">
-  <link rel="stylesheet" href="/static/dashboard.css?v=scale-server-20261016">
-  <script src="/static/dashboard.js?v=scale-server-20261016" defer></script>
+  <link rel="stylesheet" href="/static/dashboard.css?v=sync-v2-20261016">
+  <script src="/static/dashboard.js?v=sync-v2-20261016" defer></script>
   <script src="/static/notifications.js" defer></script>
 </head>
 <body>
@@ -119,7 +119,7 @@
         <button class="clear-filters" id="clear-filters" type="button">Limpiar filtros</button>
       </form>
 
-      <div class="table-toolbar"><span id="filtered-count">Mostrando 0 hosts y servicios</span><label class="page-size-control" for="page-size"><span>Elementos por página</span><select id="page-size" aria-label="Elementos por página"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="250">250</option><option value="all">Todos</option></select></label><span class="table-hint">Selecciona un encabezado para ordenar</span></div>
+      <div class="table-toolbar"><span id="filtered-count">Mostrando 0 hosts y servicios</span><label class="page-size-control" for="monitoring-view"><span>Vista</span><select id="monitoring-view" aria-label="Vista de monitoreo"><option value="desktop">Visibles en NaftaMon Desktop</option><option value="all">RAW completo</option></select></label><label class="page-size-control" for="page-size"><span>Elementos por página</span><select id="page-size" aria-label="Elementos por página"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="250">250</option><option value="all">Todos</option></select></label><span class="table-hint">Selecciona un encabezado para ordenar</span></div>
       <div class="table-scroll" id="monitoring-scroll" tabindex="0" aria-label="Tabla de monitoreo; desplazamiento horizontal disponible en pantallas pequeñas">
         <table class="alerts-table">
           <thead><tr>

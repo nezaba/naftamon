@@ -34,6 +34,8 @@ struct AppConfig {
     bool webhookEnabled = false;
     QString webhookUrl;
     int webhookIntervalSeconds = 60;
+    int webhookTimeoutSeconds = 30;
+    QString webhookSourceId;
     bool floatingBar = true;
     Filters filters;
     bool notify = true, flash = true, sound = true, soundRepeat = false, desktop = false;

@@ -76,9 +76,9 @@ docker compose -f compose.dev.yaml down
 
 ## Webhook Gateway
 
-The Gateway is disabled by default. In the main window, **Gateway: Disabled/Enabled** shows its state and switches delivery on or off immediately. Choose **Configure…** beside it to enter an HTTP or HTTPS URL and a send interval from 1 to 86400 seconds. Save applies the values immediately and preserves them across restarts. The line beside the buttons shows the time and HTTP result of the last send, including connection errors. Disabling stops the timer and aborts an in-flight periodic POST.
+The Gateway is disabled by default. In the main window, **Gateway: Disabled/Enabled** shows its state and switches delivery on or off immediately. Choose **Configure…** beside it to enter an HTTP or HTTPS URL, send interval, and request timeout (5–300 seconds, 30 by default). Save applies the values immediately and preserves them across restarts. The line beside the buttons shows the time and HTTP result of the last send, including connection and timeout errors. Each periodic sender has at most one active request; up to three attempts reuse the same snapshot ID and body. Disabling or changing the destination cancels the in-flight request and reports why.
 
-**Test Webhook** in the configuration window sends a separate JSON marked as a test to the URL currently entered there. It works while the Gateway is disabled and reports the HTTP status, up to 4 KiB of the response body, or a connection error without freezing the window. It does not save the URL or enable periodic delivery; use **Save** and then the main switch for that. One manual test and one periodic POST may be in progress at a time. A canceled periodic send is shown as "Cancelled". In the Docker lab, enter `http://webhooks:8080/webhook` and inspect the received JSON with `docker compose -f compose.dev.yaml logs -f webhooks` or `docker compose -f compose.dev.yaml exec dev python3 -c "import urllib.request; print(urllib.request.urlopen('http://webhooks:8080/received').read().decode())"`.
+**Test Webhook** in the configuration window sends a separate JSON marked as a test to the URL currently entered there. It works while the Gateway is disabled and reports the HTTP status, up to 4 KiB of the response body, or a connection error without freezing the window. It does not save the URL or enable periodic delivery; use **Save** and then the main switch for that. One manual test and one periodic POST may be in progress at a time. In the Docker lab, enter `http://webhooks:8080/webhook` and inspect the received JSON with `docker compose -f compose.dev.yaml logs -f webhooks` or `docker compose -f compose.dev.yaml exec dev python3 -c "import urllib.request; print(urllib.request.urlopen('http://webhooks:8080/received').read().decode())"`.
 
 The preferences use the existing QSettings INI file (in the lab: `/lab-state/config/naftamon.ini`):
 
@@ -86,28 +86,39 @@ The preferences use the existing QSettings INI file (in the lab: `/lab-state/con
 webhook_enabled=true
 webhook_url=http://webhooks:8080/webhook
 webhook_interval_seconds=60
+webhook_timeout_seconds=30
+webhook_source_id=96ce1ec3-6268-4c03-bdb7-d77caa77bb88
 ```
 
 When editing the INI manually, restart NaftaMon to reload it. The GUI writes the same keys and applies changes while NaftaMon runs.
 
-Periodic POSTs use this JSON format (example values):
+Periodic POSTs use the versioned v2 format. `source_id` is a persistent UUID for this Desktop installation; `snapshot_id` is new for each snapshot and stays unchanged across retries. `alerts[]` contains all active problem rows from successful Thruk servers. `visible_in_desktop` records the result of the same `applyFilters()` function used by the Desktop; it does not drop filtered rows from the snapshot. The summary is calculated from that snapshot. Example:
 
 ```json
 {
+  "schema_version": 2,
   "timestamp": "2026-10-14T22:00:00.000Z",
   "source": "NaftaMon",
+  "source_id": "96ce1ec3-6268-4c03-bdb7-d77caa77bb88",
+  "snapshot_id": "c9e37440-1d36-4a75-8d9e-7bf8c76c060b",
   "complete": true,
   "servers": [{"server": "Thruk de prueba", "status": "ok"}],
   "alerts": [{
     "server": "Thruk de prueba", "backend": "alpha", "host": "db01", "service": "disk",
-    "type": "service", "state": "CRITICAL", "hard": true,
+    "type": "service", "state": "CRITICAL", "status_information": "DISK CRITICAL — 94% ✓",
+    "hard": true,
     "acknowledged": false, "downtime": false,
-    "last_check": "2026-10-14T21:59:00Z", "last_change": "2026-10-14T21:30:00Z"
-  }]
+    "last_check": "2026-10-14T21:59:00Z", "last_change": "2026-10-14T21:30:00Z",
+    "visible_in_desktop": true
+  }],
+  "summary": {
+    "raw": {"total": 1, "by_state": {"CRITICAL": 1}},
+    "visible": {"total": 1, "by_state": {"CRITICAL": 1}}
+  }
 }
 ```
 
-An empty successful poll sends `"complete": true` with `"alerts": []`. A failed or pending poll sends `"complete": false` and marks the corresponding server `"error"` or `"pending"`; its stale cached alerts are excluded. The test button sends `{"type":"test","test":true,"source":"NaftaMon","timestamp":"…","message":"NaftaMon test webhook"}` without alerts. The gateway does not use table, search, state, acknowledgement, or downtime filters. It sends no Thruk URL, username, password, token, or free-form plugin output. Backends excluded in a Thruk server's configuration are absent from that server's poll and therefore absent from the payload. The lab receiver accepts JSON bodies up to 8 MiB and retains the last 10 for test inspection at `/received`; `/stats` exposes request counters.
+An empty successful poll sends `"complete": true` with `"alerts": []`. A failed or pending poll marks that server `"error"` or `"pending"`; the Web preserves its previous alert rows and does not infer recovery. V2 sends no UP rows, so snapshots with 165,950 healthy objects remain small. ACK and downtime flags stay on each alert and do not filter `alerts[]`. The test button sends a separate `type: test` message. V1 consumers remain supported through a compatibility fallback if they reject v2 fields. The payload excludes Thruk URL, username, password, token, and other credentials; `status_information` is the original plugin output and should be treated as untrusted text. The lab receiver retains the last 10 test bodies at `/received`; `/stats` exposes request counters.
 
 ## Why it is faster than Nagstamon
 
