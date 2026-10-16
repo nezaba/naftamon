@@ -149,7 +149,7 @@ La recuperación se fecha cuando el servidor web observa que la alerta ya no est
 
 El motor de notificaciones está apagado inicialmente. Los canales y reglas nuevos también comienzan deshabilitados. El contenedor `notifications` procesa la cola SQLite en segundo plano; si un proveedor falla, el receptor sigue almacenando snapshots. La sección **Notifications** permite configurar Rules, Channels, History y Settings desde el dashboard. La prueba de una regla solo muestra coincidencias; el botón de prueba de un canal sí intenta enviar un mensaje al destino configurado.
 
-Los eventos admitidos son apertura, cambio de estado, recuperación observada y recordatorio opcional. Un snapshot idéntico no vuelve a notificar. Una recuperación exige una respuesta `ok` del servidor Thruk correspondiente; errores y silencios no se tratan como recuperación. Los objetos UP recibidos en `ok_statuses[]` se guardan fuera del flujo de alertas y no crean notificaciones. Los filtros y plantillas actuales no usan `status_information`; agregarlo a esas reglas queda fuera de esta versión. No hay un ID estable de instalación. Consulta el [diseño y límites del motor](docs/notification-design.md).
+Los eventos admitidos son apertura, cambio de estado, recuperación observada y recordatorio opcional. Un snapshot idéntico no vuelve a notificar. Una recuperación exige una respuesta `ok` del servidor Thruk correspondiente; errores y silencios no se tratan como recuperación. Los objetos UP recibidos en `ok_statuses[]` se guardan fuera del flujo de alertas y no crean notificaciones. Las reglas admiten filtros por `status_information`. No hay un ID estable de instalación. Consulta el [diseño y límites del motor](docs/notification-design.md).
 
 Los destinos soportados son Telegram, Gotify, ntfy y webhook HTTP. Telegram requiere bot token y chat ID; Gotify requiere URL de servidor y application token; ntfy requiere URL y topic, con credenciales opcionales; webhook HTTP requiere URL y admite headers y cuerpo JSON controlados. Las credenciales se cifran con una clave local externa a SQLite. Para crearla desde `web/`, primero construye la imagen y crea el directorio local:
 
@@ -172,6 +172,14 @@ docker compose up -d
 ```
 
 Guarda una copia de esa clave **separada** del backup SQLite, con acceso restringido. Si se pierde, los tokens cifrados existentes no pueden recuperarse; hay que configurarlos otra vez. Si cambias la clave sin recifrar los tokens, los canales con credenciales dejarán de enviar. `.local/` y `.env` no se incluyen en Git ni en la imagen. Para un Gotify o ntfy en LAN, declara solo su subred privada necesaria en `NOTIFICATION_ALLOWED_DESTINATION_CIDRS`, por ejemplo `192.168.1.0/24`, y recrea `web` y `notifications`. No uses un rango amplio como `0.0.0.0/0`.
+
+### Backup de configuración de Notifications
+
+En **Notifications → Settings → Backup y restauración**, descarga un JSON con los ajustes globales, reglas y condiciones (incluido `status_information`), canales, configuraciones de proveedor, plantillas y asociaciones. La exportación normal excluye credenciales y el preview advierte que esos canales se restaurarán deshabilitados. Para una copia completa usa **Exportar copia cifrada** y conserva la contraseña larga aparte. El formato y los límites están en [notification-backup-format.md](docs/notification-backup-format.md).
+
+Antes de reemplazar la configuración, la aplicación guarda hasta 10 puntos de recuperación locales en SQLite. Si necesitas revertir una restauración, usa **Recuperar configuración anterior** en la misma pantalla. Estas copias locales guardan los secretos cifrados con `.local/notification.key`; deben vivir junto con esa clave y no viajan en el JSON portable. El reemplazo se hace en una transacción, cancela las entregas pendientes y conserva el historial de notificaciones y el monitoreo actual. Ningún evento se vuelve a notificar por restaurar.
+
+Los backups no llevan autenticación propia: los endpoints y la interfaz heredan la restricción de LAN confiable de esta versión. La contraseña de un backup cifrado se envía al servicio local para cifrar o descifrar; con HTTP solo debe hacerse en una red de confianza. El tamaño máximo del archivo es 2 MiB y esta versión acepta el esquema 1. Una entrega que el worker ya haya enviado al proveedor no se puede cancelar desde la restauración.
 
 Puedes inspeccionar el worker con `docker compose logs --tail 100 notifications` y su estado con `docker compose ps`. El historial visual y la API de notificaciones muestran intentos, resultado y errores saneados. Los reintentos son limitados; debido a la ventana entre un POST externo exitoso y su confirmación en SQLite, un proveedor sin idempotencia puede recibir un duplicado tras un corte abrupto.
 

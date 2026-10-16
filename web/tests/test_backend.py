@@ -524,7 +524,7 @@ def test_schema_v6_migration_adds_source_tombstone_without_losing_notification_e
 
     initialize(database_path)
     with connect(database_path) as db:
-        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
         assert db.execute("SELECT id FROM notification_events WHERE id='legacy-event'").fetchone()[0] == "legacy-event"
         assert "deleted_at" in {row["name"] for row in db.execute("PRAGMA table_info(sources)")}
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Add future schema changes as transactional SQL statements keyed by version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -241,6 +241,15 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         # source_id foreign key while all current monitoring state is removed.
         "ALTER TABLE sources ADD COLUMN deleted_at TEXT",
         "CREATE INDEX idx_sources_deleted_source_peer ON sources(deleted_at, source_name, peer_ip)",
+    ),
+    8: (
+        """CREATE TABLE notification_config_backups (
+            id INTEGER PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            secrets_ciphertext TEXT
+        )""",
+        "CREATE INDEX idx_notification_config_backups_created ON notification_config_backups(id DESC)",
     ),
 }
 

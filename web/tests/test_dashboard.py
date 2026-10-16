@@ -186,6 +186,29 @@ def test_notifications_ui_is_local_secret_safe_and_matches_api_contract(client):
     assert "no coincide, también con operadores negativos" in response.text
 
 
+def test_notification_settings_exposes_backup_preview_encryption_and_recovery_controls(client):
+    page = client.get("/").text
+    for element_id in (
+        "notification-backup-title", "export-notification-backup", "export-encrypted-notification-backup",
+        "backup-export-password", "backup-export-password-confirm", "notification-backup-file",
+        "backup-import-password", "preview-notification-backup", "notification-backup-preview",
+        "restore-notification-backup", "restore-previous-notification-backup",
+    ):
+        assert f'id="{element_id}"' in page
+    assert "El archivo JSON no incluye credenciales" in page
+    assert "no tiene autenticación" in page
+    script = client.get("/static/notifications.js").text
+    for endpoint in (
+        '`${API}/backup/export`', '"/backup/preview"', '"/backup/restore"',
+        '"/backup/previous"', '"/backup/restore-previous"',
+    ):
+        assert endpoint in script
+    assert "JSON.parse(raw)" in script
+    assert "preview.warnings" in script
+    assert "confirm_replace: true" in script
+    assert "innerHTML" not in script
+
+
 def test_notifications_ui_has_no_dangling_static_element_selectors(client):
     import html.parser
 

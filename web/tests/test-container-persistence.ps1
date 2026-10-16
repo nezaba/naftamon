@@ -89,6 +89,30 @@ try {
         throw "The test alert was not preserved across container recreation."
     }
 
+    $rule = @{
+        name = "docker-backup-original"
+        enabled = $true
+        conditions = @{ operator = "AND"; conditions = @(@{ field = "host"; operator = "equals"; value = "docker-persistence-smoke" }) }
+        events = @("opened", "state_changed")
+        channel_ids = @()
+    } | ConvertTo-Json -Depth 8
+    Invoke-RestMethod -Uri "$baseUrl/api/v1/notifications/rules" -Method Post `
+        -ContentType "application/json" -Body $rule -TimeoutSec 10 | Out-Null
+    $configBackup = Invoke-RestMethod -Uri "$baseUrl/api/v1/notifications/backup/export" -Method Post `
+        -ContentType "application/json" -Body '{"password":null}' -TimeoutSec 10
+    $configBackup.notifications.rules[0].name = "docker-backup-replacement"
+    $restorePayload = @{
+        backup = $configBackup
+        password = $null
+        confirm_replace = $true
+    } | ConvertTo-Json -Depth 20
+    Invoke-RestMethod -Uri "$baseUrl/api/v1/notifications/backup/restore" -Method Post `
+        -ContentType "application/json" -Body $restorePayload -TimeoutSec 10 | Out-Null
+    $currentRules = Invoke-RestMethod -Uri "$baseUrl/api/v1/notifications/rules" -TimeoutSec 10
+    if ($currentRules.items.Count -ne 1 -or $currentRules.items[0].name -ne "docker-backup-replacement") {
+        throw "The notification config replacement was not applied before the container restart."
+    }
+
     & docker compose --project-name $projectName exec -T web python -c "import sqlite3; source=sqlite3.connect('/data/naftamon.sqlite3'); target=sqlite3.connect('/tmp/naftamon-backup.sqlite3'); source.backup(target); target.close(); source.close()"
     if ($LASTEXITCODE -ne 0) { throw "SQLite online backup failed with exit code $LASTEXITCODE." }
     & docker compose --project-name $projectName cp web:/tmp/naftamon-backup.sqlite3 $backupPath
@@ -113,7 +137,18 @@ try {
         throw "The SQLite backup did not restore the test alert."
     }
 
-    Write-Output "PASS: SQLite data survived restart, recreation, online backup and restore (Compose project $projectName)."
+    $previousConfig = Invoke-RestMethod -Uri "$baseUrl/api/v1/notifications/backup/previous" -TimeoutSec 10
+    if (-not $previousConfig.available -or $previousConfig.rules -ne 1) {
+        throw "The pre-restore notification configuration backup did not persist through container restart/recreation."
+    }
+    Invoke-RestMethod -Uri "$baseUrl/api/v1/notifications/backup/restore-previous" -Method Post `
+        -ContentType "application/json" -Body '{"confirm_replace":true}' -TimeoutSec 10 | Out-Null
+    $recoveredRules = Invoke-RestMethod -Uri "$baseUrl/api/v1/notifications/rules" -TimeoutSec 10
+    if ($recoveredRules.items.Count -ne 1 -or $recoveredRules.items[0].name -ne "docker-backup-original") {
+        throw "The pre-restart notification config backup could not be restored after the container restart."
+    }
+
+    Write-Output "PASS: SQLite monitoring data and a notification config rollback point survived restart, recreation, online backup and restore (Compose project $projectName)."
 }
 finally {
     try {

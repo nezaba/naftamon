@@ -211,6 +211,37 @@
         <div class="setting-row retention-row"><div><strong>Retención del historial</strong><p>Las entregas anteriores se eliminan según este plazo. Usa 0 para conservarlas sin limpieza automática.</p></div><label class="retention-input"><span>Días</span><input id="settings-retention-days" type="number" min="0" max="3650" step="1" required></label></div>
         <div class="settings-footer"><span id="settings-updated-at" class="muted-text">—</span><button class="primary-action" type="submit" id="save-notification-settings">Guardar cambios</button></div>
       </form>
+      <section class="settings-card backup-card" aria-labelledby="notification-backup-title">
+        <div class="backup-heading"><div><h3 id="notification-backup-title">Backup y restauración</h3><p>Guarda o recupera reglas, canales, configuración global y sus asociaciones.</p></div></div>
+        <div class="backup-grid">
+          <div class="backup-panel">
+            <h4>Exportar configuración</h4>
+            <p>El archivo JSON no incluye credenciales. Al restaurarlo, los canales que las tenían quedarán deshabilitados hasta volver a configurarlas.</p>
+            <button class="secondary-action" id="export-notification-backup" type="button">Exportar configuración</button>
+            <details class="encrypted-backup-options">
+              <summary>Incluir credenciales en una copia cifrada</summary>
+              <p>Usa una contraseña larga que puedas conservar por separado. No se guarda en NaftaMon y no se puede recuperar si la pierdes.</p>
+              <label class="backup-field"><span>Contraseña de cifrado (mínimo 12 caracteres)</span><input id="backup-export-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
+              <label class="backup-field"><span>Repetir contraseña</span><input id="backup-export-password-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
+              <button class="primary-action" id="export-encrypted-notification-backup" type="button">Exportar copia cifrada</button>
+            </details>
+          </div>
+          <div class="backup-panel">
+            <h4>Restaurar configuración</h4>
+            <p>Selecciona un JSON de NaftaMon. Primero se valida y muestra una vista previa; la restauración reemplaza reglas y canales actuales.</p>
+            <label class="backup-field"><span>Archivo JSON</span><input id="notification-backup-file" type="file" accept="application/json,.json"></label>
+            <label class="backup-field"><span>Contraseña (solo para backups cifrados)</span><input id="backup-import-password" type="password" autocomplete="current-password" maxlength="1024"></label>
+            <button class="secondary-action" id="preview-notification-backup" type="button">Validar y previsualizar</button>
+            <div id="notification-backup-preview" class="backup-preview" aria-live="polite" hidden></div>
+            <button class="danger-action" id="restore-notification-backup" type="button" disabled>Reemplazar configuración actual</button>
+          </div>
+        </div>
+        <div class="previous-backup" id="previous-notification-backup" hidden>
+          <div><strong>Copia previa al último reemplazo</strong><p id="previous-notification-backup-info">—</p></div>
+          <button class="secondary-action" id="restore-previous-notification-backup" type="button">Recuperar configuración anterior</button>
+        </div>
+        <p class="backup-scope-note">El backup no incluye alertas, hosts, servicios, fuentes ni historial de entregas. La aplicación no tiene autenticación: restringe este control con el firewall a una LAN confiable.</p>
+      </section>
       <div class="security-note"><span aria-hidden="true">⚠</span><div><strong>Acceso sin autenticación</strong><p>Cualquier equipo que alcance esta aplicación puede cambiar reglas, destinos y solicitar pruebas. Restringe el puerto mediante firewall a una LAN confiable. Los valores secretos solo se muestran en el momento de introducirlos.</p></div></div>
     </section>
 
