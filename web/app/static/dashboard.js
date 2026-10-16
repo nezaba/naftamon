@@ -6,7 +6,7 @@
   const state = {
     alerts: [], statuses: [], sources: [], offlineAfter: 900, historyItems: [], historyTotal: 0,
     pollMs: 5000, timer: null, refreshing: false, lastSuccess: null,
-    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50,
+    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50, filteredAlerts: [], virtualized: false, virtualTop: null, virtualBottom: null,
     historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(), pagingWarning: false,
     statusRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
   };
@@ -235,21 +235,74 @@
     });
     while (container.children.length > nodes.length) container.lastElementChild.remove();
   }
+  function statusRow(alert, rowIndex) {
+    const key = String(alert.id);
+    let tr = state.statusRows.get(key);
+    if (!tr) { tr = makeStatusRow(alert); state.statusRows.set(key, tr); }
+    updateAlertRow(tr, alert);
+    tr.setAttribute("aria-rowindex", String(rowIndex + 2));
+    return tr;
+  }
+  function clearHiddenStatusRows(items) {
+    const visibleIds = new Set(items.map((alert) => String(alert.id)));
+    for (const key of state.statusRows.keys()) if (!visibleIds.has(key)) state.statusRows.delete(key);
+  }
+  function renderVirtualRows() {
+    const items = state.filteredAlerts;
+    const scroll = $("#monitoring-scroll");
+    if (!items.length) { moveNodes(refs.alertBody, []); state.statusRows.clear(); return; }
+    const headerHeight = scroll.querySelector("thead")?.getBoundingClientRect().height || 40;
+    let sampleRow = refs.alertBody.querySelector("tr:not(.virtual-spacer)");
+    if (!sampleRow) { sampleRow = statusRow(items[0], 0); refs.alertBody.append(sampleRow); }
+    const measuredHeight = sampleRow.getBoundingClientRect().height || 56;
+    const rowHeight = measuredHeight;
+    const overscan = 8;
+    const visibleCapacity = Math.max(30, Math.ceil(Math.max(0, scroll.clientHeight - headerHeight) / rowHeight) + overscan * 2);
+    const requestedStart = Math.floor(Math.max(0, scroll.scrollTop - headerHeight) / rowHeight) - overscan;
+    const start = Math.max(0, Math.min(items.length - visibleCapacity, requestedStart));
+    const end = Math.min(items.length, start + visibleCapacity);
+    if (!state.virtualTop) {
+      state.virtualTop = make("tr", "virtual-spacer");
+      state.virtualTop.setAttribute("aria-hidden", "true");
+      const topCell = make("td"); topCell.colSpan = 11; state.virtualTop.append(topCell);
+    }
+    if (!state.virtualBottom) {
+      state.virtualBottom = make("tr", "virtual-spacer");
+      state.virtualBottom.setAttribute("aria-hidden", "true");
+      const bottomCell = make("td"); bottomCell.colSpan = 11; state.virtualBottom.append(bottomCell);
+    }
+    state.virtualTop.firstElementChild.style.height = `${start * rowHeight}px`;
+    state.virtualBottom.firstElementChild.style.height = `${(items.length - end) * rowHeight}px`;
+    const visible = items.slice(start, end);
+    const rows = visible.map((alert, index) => statusRow(alert, start + index));
+    clearHiddenStatusRows(visible);
+    moveNodes(refs.alertBody, [state.virtualTop, ...rows, state.virtualBottom]);
+  }
   function renderAlerts() {
     const allFiltered = filteredStatuses().sort(compareAlerts);
-    const totalPages = Math.max(1, Math.ceil(allFiltered.length / state.pageSize));
+    state.filteredAlerts = allFiltered;
+    const scroll = $("#monitoring-scroll");
+    const showAll = state.pageSize === "all";
+    const totalPages = showAll ? 1 : Math.max(1, Math.ceil(allFiltered.length / state.pageSize));
     state.page = Math.min(state.page, totalPages - 1);
-    const pageItems = allFiltered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
-    const nodes = pageItems.map((alert) => {
-      const key = String(alert.id);
-      let tr = state.statusRows.get(key);
-      if (!tr) { tr = makeStatusRow(alert); state.statusRows.set(key, tr); }
-      updateAlertRow(tr, alert);
-      return tr;
-    });
-    const visibleIds = new Set(pageItems.map((alert) => String(alert.id)));
-    for (const key of state.statusRows.keys()) if (!visibleIds.has(key)) state.statusRows.delete(key);
-    moveNodes(refs.alertBody, nodes);
+    scroll.querySelector(".alerts-table").setAttribute("aria-rowcount", String(allFiltered.length + 1));
+    const virtualized = showAll && allFiltered.length > 250;
+    if (virtualized !== state.virtualized) {
+      state.virtualized = virtualized;
+      scroll.classList.toggle("is-virtualized", virtualized);
+      scroll.scrollTop = 0;
+    }
+    let pageItems;
+    if (virtualized) {
+      pageItems = allFiltered;
+      renderVirtualRows();
+    } else {
+      pageItems = showAll ? allFiltered : allFiltered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
+      const rowOffset = showAll ? 0 : state.page * state.pageSize;
+      const nodes = pageItems.map((alert, index) => statusRow(alert, rowOffset + index));
+      clearHiddenStatusRows(pageItems);
+      moveNodes(refs.alertBody, nodes);
+    }
     const noSources = state.sources.length === 0;
     const noStatuses = state.statuses.length === 0;
     refs.tableEmpty.hidden = pageItems.length !== 0;
@@ -266,13 +319,17 @@
       refs.tableEmptyTitle.textContent = "No hay resultados con esos filtros";
       refs.tableEmptyText.textContent = "Prueba cambiar los criterios o limpiar los filtros.";
     }
-    const start = allFiltered.length ? state.page * state.pageSize + 1 : 0;
-    const end = Math.min((state.page + 1) * state.pageSize, allFiltered.length);
-    setText("#filtered-count", allFiltered.length === state.statuses.length ? `Mostrando ${start}–${end} de ${allFiltered.length} hosts y servicios` : `${allFiltered.length} de ${state.statuses.length} estados coinciden`);
+    const start = allFiltered.length ? (showAll ? 1 : state.page * state.pageSize + 1) : 0;
+    const end = showAll ? allFiltered.length : Math.min((state.page + 1) * state.pageSize, allFiltered.length);
+    if (allFiltered.length === state.statuses.length) {
+      setText("#filtered-count", showAll ? `Mostrando todos los ${allFiltered.length} hosts y servicios` : `Mostrando ${start}–${end} de ${allFiltered.length} hosts y servicios`);
+    } else {
+      setText("#filtered-count", showAll ? `${allFiltered.length} de ${state.statuses.length} estados coinciden · todos visibles` : `${allFiltered.length} de ${state.statuses.length} estados coinciden`);
+    }
     setText("#alert-count-label", `${state.statuses.length} ${state.statuses.length === 1 ? "elemento" : "elementos"}`);
     setText("#tab-alert-count", state.statuses.length);
-    const pagination = $("#pagination"); pagination.hidden = allFiltered.length <= state.pageSize;
-    setText("#page-summary", `Página ${state.page + 1} de ${totalPages}`);
+    const pagination = $("#pagination"); pagination.hidden = showAll || allFiltered.length <= state.pageSize;
+    setText("#page-summary", showAll ? `Todos · ${allFiltered.length} registros` : `Página ${state.page + 1} de ${totalPages} · ${start}–${end} de ${allFiltered.length}`);
     $("#page-prev").disabled = state.page <= 0; $("#page-next").disabled = state.page >= totalPages - 1;
     for (const button of $$("[data-sort]")) {
       const selected = button.dataset.sort === state.sort.key;
@@ -465,20 +522,39 @@
   function scheduleRefresh() { if (state.timer) window.clearTimeout(state.timer); state.timer = window.setTimeout(async () => { await refresh(); restartPolling(); }, 0); }
 
   $("#filters").addEventListener("submit", (event) => event.preventDefault());
-  $("#filters").addEventListener("input", (event) => { if (event.target.matches("input")) { state.page = 0; renderAlerts(); } });
-  $("#filters").addEventListener("change", (event) => { if (event.target.matches("select")) { state.page = 0; renderAlerts(); } });
+  function resetMonitoringPosition() { if (state.virtualized) $("#monitoring-scroll").scrollTop = 0; }
+  $("#filters").addEventListener("input", (event) => { if (event.target.matches("input")) { state.page = 0; resetMonitoringPosition(); renderAlerts(); } });
+  $("#filters").addEventListener("change", (event) => { if (event.target.matches("select")) { state.page = 0; resetMonitoringPosition(); renderAlerts(); } });
   $("#clear-filters").addEventListener("click", () => {
     for (const selector of ["#filter-host", "#filter-service", "#filter-text", "#filter-severity", "#filter-server", "#filter-backend", "#filter-source", "#filter-ack", "#filter-downtime"]) $(selector).value = "";
-    state.page = 0; renderAlerts(); $("#filter-host").focus();
+    state.page = 0; resetMonitoringPosition(); renderAlerts(); $("#filter-host").focus();
   });
   for (const button of $$("[data-sort]")) button.addEventListener("click", () => {
     const key = button.dataset.sort;
     if (state.sort.key === key) state.sort.direction *= -1;
     else { state.sort.key = key; state.sort.direction = 1; }
+    resetMonitoringPosition();
     renderAlerts();
   });
   $("#page-prev").addEventListener("click", () => { state.page = Math.max(0, state.page - 1); renderAlerts(); });
   $("#page-next").addEventListener("click", () => { state.page += 1; renderAlerts(); });
+  $("#page-size").addEventListener("change", (event) => {
+    const selected = event.target.value;
+    const newSize = selected === "all" ? "all" : Number(selected);
+    if (![25, 50, 100, 250, "all"].includes(newSize)) return;
+    if (state.pageSize === "all" || newSize === "all") { state.page = 0; $("#monitoring-scroll").scrollTop = 0; }
+    state.pageSize = newSize;
+    storageSet("naftamon-monitor-page-size", String(newSize));
+    renderAlerts();
+  });
+  let virtualRenderPending = false;
+  function scheduleVirtualRender() {
+    if (!state.virtualized || virtualRenderPending) return;
+    virtualRenderPending = true;
+    window.requestAnimationFrame(() => { virtualRenderPending = false; if (state.virtualized) renderVirtualRows(); });
+  }
+  $("#monitoring-scroll").addEventListener("scroll", scheduleVirtualRender, { passive: true });
+  window.addEventListener("resize", scheduleVirtualRender, { passive: true });
   $("#history-prev").addEventListener("click", () => { state.historyPage = Math.max(0, state.historyPage - 1); fetchHistory().catch(showHistoryError); });
   $("#history-next").addEventListener("click", () => { state.historyPage += 1; fetchHistory().catch(showHistoryError); });
   $("#history-source").addEventListener("change", () => { state.historyPage = 0; fetchHistory().catch(showHistoryError); });
@@ -498,6 +574,11 @@
   const savedTheme = storageGet("naftamon-theme"); updateTheme(savedTheme === "light" ? "light" : "dark");
   const savedInterval = Number(storageGet("naftamon-poll-ms"));
   if ([5000, 10000, 15000, 30000, 60000].includes(savedInterval)) { state.pollMs = savedInterval; $("#poll-interval").value = String(savedInterval); }
+  const savedPageSize = storageGet("naftamon-monitor-page-size");
+  if (["25", "50", "100", "250", "all"].includes(savedPageSize)) {
+    state.pageSize = savedPageSize === "all" ? "all" : Number(savedPageSize);
+    $("#page-size").value = savedPageSize;
+  }
   window.setInterval(renderAges, 1000);
   refresh().finally(restartPolling);
 })();

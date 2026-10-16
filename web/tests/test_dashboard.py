@@ -6,13 +6,14 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Estado de infraestructura" in response.text
-    assert 'href="/static/dashboard.css"' in response.text
-    assert 'src="/static/dashboard.js"' in response.text
+    assert 'href="/static/dashboard.css?v=monitoring-page-size-20261016"' in response.text
+    assert 'src="/static/dashboard.js?v=monitoring-page-size-20261016"' in response.text
     assert not re.search(r'(?:src|href)=["\']https?://', response.text, re.IGNORECASE)
     assert 'id="login"' not in response.text.lower()
     assert not re.search(r'<form[^>]+(?:login|auth)', response.text, re.IGNORECASE)
     assert 'name="username"' not in response.text.lower()
     assert '<link rel="icon" type="image/svg+xml" href="/favicon.ico">' in response.text
+    assert response.headers["cache-control"] == "no-cache"
 
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 200
@@ -22,6 +23,7 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     css = client.get("/static/dashboard.css")
     js = client.get("/static/dashboard.js")
     assert css.status_code == js.status_code == 200
+    assert css.headers["cache-control"] == js.headers["cache-control"] == "no-cache"
     assert "data-theme=\"light\"" in css.text
     assert "fetchAllStatuses" in js.text
     assert "/api/v1/statuses?limit=${limit}&offset=${offset}" in js.text
@@ -62,6 +64,31 @@ def test_monitoring_table_exposes_status_information_and_searches_it_safely(clie
     assert "text-overflow: ellipsis" in css
     assert "overflow: hidden" in css
     assert 'data-state="UP"' in css
+
+
+def test_monitoring_page_size_choices_persist_and_all_mode_uses_filtered_rows(client):
+    page = client.get("/").text
+    assert 'id="page-size"' in page
+    assert 'id="page-size" aria-label="Elementos por página"' in page
+    for option in (
+        '<option value="25">25</option>', '<option value="50" selected>50</option>',
+        '<option value="100">100</option>', '<option value="250">250</option>',
+        '<option value="all">Todos</option>',
+    ):
+        assert option in page
+    assert 'id="monitoring-scroll"' in page
+
+    script = client.get("/static/dashboard.js").text
+    assert 'storageSet("naftamon-monitor-page-size"' in script
+    assert 'storageGet("naftamon-monitor-page-size")' in script
+    assert 'const allFiltered = filteredStatuses().sort(compareAlerts)' in script
+    assert 'const showAll = state.pageSize === "all"' in script
+    assert 'const virtualized = showAll && allFiltered.length > 250' in script
+    assert 'function renderVirtualRows()' in script
+    assert 'if (!sampleRow) { sampleRow = statusRow(items[0], 0); refs.alertBody.append(sampleRow); }' in script
+    assert 'sampleRow.getBoundingClientRect().height || 56' in script
+    assert 'setAttribute("aria-rowcount"' in script
+    assert 'setAttribute("aria-rowindex"' in script
 
 
 def test_monitoring_feed_keeps_status_information_attached_to_each_server_and_service(client):
