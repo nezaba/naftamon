@@ -12,6 +12,12 @@ def test_dashboard_is_the_unauthenticated_home_page_with_local_assets(client):
     assert 'id="login"' not in response.text.lower()
     assert not re.search(r'<form[^>]+(?:login|auth)', response.text, re.IGNORECASE)
     assert 'name="username"' not in response.text.lower()
+    assert '<link rel="icon" type="image/svg+xml" href="/favicon.ico">' in response.text
+
+    favicon = client.get("/favicon.ico")
+    assert favicon.status_code == 200
+    assert favicon.headers["content-type"].startswith("image/svg+xml")
+    assert b"<svg" in favicon.content
 
     css = client.get("/static/dashboard.css")
     js = client.get("/static/dashboard.js")

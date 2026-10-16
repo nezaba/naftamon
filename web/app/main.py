@@ -139,6 +139,10 @@ def create_app(
     def root():
         return FileResponse(static_dir / "index.html", media_type="text/html")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return FileResponse(static_dir / "favicon.svg", media_type="image/svg+xml")
+
     @app.post(INGEST_PATH, status_code=202)
     async def ingest(request: Request):
         content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
