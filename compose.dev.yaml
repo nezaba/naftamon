@@ -15,7 +15,7 @@ services:
       - build:/workspace/build
       - state:/lab-state
     ports:
-      - "127.0.0.1:6080:6080"
+      - "127.0.0.1:${NAFTAMON_NOVNC_PORT:-6080}:6080"
     depends_on:
       thruk:
         condition: service_healthy

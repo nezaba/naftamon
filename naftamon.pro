@@ -1,6 +1,7 @@
 TEMPLATE = app
 TARGET = naftamon
 QT += widgets network multimedia
+LIBS += -lz
 CONFIG += c++17 release
 QMAKE_CXXFLAGS_RELEASE += -O2
 SOURCES += src/main.cpp src/core.cpp src/thruk.cpp src/webhookgateway.cpp src/ui.cpp

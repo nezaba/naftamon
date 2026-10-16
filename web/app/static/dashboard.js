@@ -4,10 +4,12 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const state = {
-    alerts: [], statuses: [], sources: [], offlineAfter: 900, inactiveAfter: 86400, historyItems: [], historyTotal: 0,
+    alerts: [], statuses: [], sources: [], backends: [], stats: null, offlineAfter: 900, inactiveAfter: 86400, historyItems: [], historyTotal: 0,
     pollMs: 5000, timer: null, refreshing: false, refreshPending: false, lastSuccess: null,
-    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50, filteredAlerts: [], virtualized: false, virtualTop: null, virtualBottom: null,
-    historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(), pagingWarning: false,
+    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50, filteredTotal: 0, virtualized: false, virtualTop: null, virtualBottom: null,
+    virtualChunks: new Map(), virtualPending: new Set(), virtualRevision: null, virtualOffset: 0, virtualStart: 0,
+    virtualChunkSize: 500, statusQueryVersion: 0,
+    historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(),
     statusRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
   };
   const stateOrder = { CRITICAL: 0, DOWN: 1, UNREACHABLE: 2, WARNING: 3, UNKNOWN: 4, UP: 5 };
@@ -76,8 +78,8 @@
     select.value = entries.some((entry) => String(entry.value) === current) ? current : "";
   }
   function updateFilterOptions() {
-    const servers = [...new Set([...state.statuses.map((item) => item.server), ...state.sources.flatMap((source) => (source.servers || []).map((server) => server.name))])].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
-    const backends = [...new Set(state.statuses.map((item) => item.backend).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const servers = [...new Set(state.sources.flatMap((source) => (source.servers || []).map((server) => server.name)))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const backends = state.backends.filter(Boolean).sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
     const sourceValues = [...new Map(state.sources.map((source) => [String(source.id), { value: source.id, label: `${source.source} · ${source.peer_ip}` }])).values()]
       .sort((a, b) => a.label.localeCompare(b.label, "es", { sensitivity: "base" }));
     syncSelect($("#filter-server"), servers.map((value) => ({ value, label: value })), "Todos");
@@ -93,29 +95,49 @@
     const timer = window.setTimeout(() => controller.abort(), 12000);
     try {
       const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status} en ${url}`);
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        const failure = new Error(detail.detail || `HTTP ${response.status} en ${url}`);
+        failure.status = response.status; failure.payload = detail; throw failure;
+      }
       return await response.json();
     } catch (error) {
       if (error.name === "AbortError") throw new Error("La consulta al backend superó 12 segundos.");
       throw error;
     } finally { window.clearTimeout(timer); }
   }
-  async function fetchAllStatuses() {
-    const limit = 500;
-    const first = await getJSON(`/api/v1/statuses?limit=${limit}&offset=0`);
-    if (!Array.isArray(first.items)) throw new Error("La API de monitoreo devolvió un formato inesperado.");
-    const expected = Number(first.total) || 0;
-    const rows = new Map(first.items.map((item) => [String(item.id), item]));
-    const offsets = [];
-    for (let offset = limit; offset < expected; offset += limit) offsets.push(offset);
-    for (let index = 0; index < offsets.length; index += 4) {
-      const pages = await Promise.all(offsets.slice(index, index + 4).map((offset) => getJSON(`/api/v1/statuses?limit=${limit}&offset=${offset}`)));
-      for (const page of pages) {
-        if (!Array.isArray(page.items)) throw new Error("La API devolvió una página de monitoreo inválida.");
-        for (const item of page.items) rows.set(String(item.id), item);
-      }
-    }
-    return { items: [...rows.values()], expected, changedDuringPaging: rows.size !== expected };
+  function statusQuery(offset, limit, revision = null) {
+    const filter = readAlertFilters();
+    const query = new URLSearchParams({
+      limit: String(limit), offset: String(offset), sort: state.sort.key,
+      direction: state.sort.direction === 1 ? "asc" : "desc",
+    });
+    if (filter.host) query.set("host_query", filter.host);
+    if (filter.service) query.set("service_query", filter.service);
+    if (filter.text) query.set("query", filter.text);
+    if (filter.state) query.set("state", filter.state);
+    if (filter.server) query.set("server", filter.server);
+    if (filter.backend) query.set("backend", filter.backend);
+    if (filter.source) query.set("source_id", filter.source);
+    if (filter.ack !== "") query.set("acknowledged", filter.ack);
+    if (filter.downtime !== "") query.set("downtime", filter.downtime);
+    if (revision !== null) query.set("revision", String(revision));
+    return query;
+  }
+  function statusOffsetForView() {
+    return state.pageSize === "all"
+      ? Math.floor(state.virtualStart / state.virtualChunkSize) * state.virtualChunkSize
+      : state.page * state.pageSize;
+  }
+  async function requestStatuses(offset, limit, revision = null) {
+    return getJSON(`/api/v1/statuses?${statusQuery(offset, limit, revision)}`);
+  }
+  function resetStatusQuery() {
+    state.statusQueryVersion += 1;
+    state.virtualChunks.clear(); state.virtualPending.clear(); state.virtualRevision = null;
+    state.virtualOffset = 0; state.virtualStart = 0; state.page = 0;
+    state.statusRows.clear();
+    if (state.pageSize === "all") $("#monitoring-scroll").scrollTop = 0;
   }
   async function fetchHistory() {
     const query = new URLSearchParams({ limit: String(state.historyPageSize), offset: String(state.historyPage * state.historyPageSize) });
@@ -131,16 +153,35 @@
     state.refreshing = true;
     setConnection("loading", "Actualizando datos");
     try {
-      const [health, sourceResult, statusResult] = await Promise.all([
-        getJSON("/healthz"), getJSON("/api/v1/sources"), fetchAllStatuses(),
+      const offset = statusOffsetForView();
+      const limit = state.pageSize === "all" ? state.virtualChunkSize : state.pageSize;
+      const queryVersion = state.statusQueryVersion;
+      let statusResult;
+      try {
+        statusResult = await requestStatuses(offset, limit, state.pageSize === "all" ? state.virtualRevision : null);
+      } catch (error) {
+        if (error.status !== 409 || state.pageSize !== "all") throw error;
+        state.virtualChunks.clear(); state.virtualRevision = null;
+        statusResult = await requestStatuses(offset, limit);
+      }
+      const [health, sourceResult, statsResult] = await Promise.all([
+        getJSON("/healthz"), getJSON("/api/v1/sources"), getJSON("/api/v1/stats"),
       ]);
-      if (health.status !== "ok" || !Array.isArray(sourceResult.items)) throw new Error("El backend respondió con un estado no válido.");
+      if (queryVersion !== state.statusQueryVersion) { state.refreshPending = true; return; }
+      if (health.status !== "ok" || !Array.isArray(sourceResult.items) || !Array.isArray(statusResult.items)) throw new Error("El backend respondió con un estado no válido.");
       state.sources = sourceResult.items;
+      state.backends = Array.isArray(sourceResult.backends) ? sourceResult.backends : [];
+      state.stats = statsResult;
       state.offlineAfter = Math.max(1, Number(sourceResult.offline_after_seconds) || 900);
       state.inactiveAfter = Math.max(1, Number(sourceResult.inactive_after_seconds) || 86400);
       state.statuses = statusResult.items;
       state.alerts = state.statuses.filter((item) => item.state !== "UP");
-      state.pagingWarning = statusResult.changedDuringPaging;
+      state.filteredTotal = Number(statusResult.total) || 0;
+      state.virtualOffset = offset;
+      if (state.pageSize === "all") {
+        state.virtualRevision = statusResult.revision;
+        state.virtualChunks.set(offset, statusResult.items);
+      }
       state.lastSuccess = Date.now();
       state.sourceClocks = new Map(state.sources.map((source) => [source.id, { age: Number(source.age_seconds) || 0, at: state.lastSuccess }]));
       refs.backendBanner.hidden = true;
@@ -152,6 +193,11 @@
         catch (error) { showHistoryError(error); }
       }
     } catch (error) {
+      if (error.status === 409 && state.pageSize === "all") {
+        state.virtualChunks.clear(); state.virtualRevision = null; state.virtualOffset = 0;
+        state.refreshPending = true;
+        return;
+      }
       refs.backendBanner.hidden = false;
       refs.backendError.textContent = error instanceof Error ? error.message : "No se pudo consultar el backend.";
       setConnection("error", "Backend no disponible");
@@ -174,22 +220,6 @@
       state: $("#filter-severity").value, server: $("#filter-server").value, backend: $("#filter-backend").value,
       source: $("#filter-source").value, ack: $("#filter-ack").value, downtime: $("#filter-downtime").value,
     };
-  }
-  function filteredStatuses() {
-    const filter = readAlertFilters();
-    const broad = (item) => normalize([item.source, item.peer_ip, item.server, item.backend, item.host, item.service, item.state, item.type, item.status_information].join(" "));
-    return state.statuses.filter((item) => {
-      if (filter.host && !normalize(item.host).includes(filter.host)) return false;
-      if (filter.service && !normalize(item.service).includes(filter.service)) return false;
-      if (filter.text && !broad(item).includes(filter.text)) return false;
-      if (filter.state && item.state !== filter.state) return false;
-      if (filter.server && item.server !== filter.server) return false;
-      if (filter.backend && item.backend !== filter.backend) return false;
-      if (filter.source && String(item.source_id) !== filter.source) return false;
-      if (filter.ack !== "" && String(Boolean(item.acknowledged)) !== filter.ack) return false;
-      if (filter.downtime !== "" && String(Boolean(item.downtime)) !== filter.downtime) return false;
-      return true;
-    });
   }
   function compareAlerts(a, b) {
     const key = state.sort.key;
@@ -257,20 +287,56 @@
     const visibleIds = new Set(items.map((alert) => String(alert.id)));
     for (const key of state.statusRows.keys()) if (!visibleIds.has(key)) state.statusRows.delete(key);
   }
+  async function fetchVirtualChunk(offset) {
+    if (state.virtualChunks.has(offset) || state.virtualPending.has(offset)) return;
+    const queryVersion = state.statusQueryVersion;
+    const revision = state.virtualRevision;
+    state.virtualPending.add(offset);
+    try {
+      const result = await requestStatuses(offset, state.virtualChunkSize, revision);
+      if (queryVersion !== state.statusQueryVersion || state.pageSize !== "all") return;
+      if (revision === null) state.virtualRevision = result.revision;
+      else if (result.revision !== revision) {
+        state.virtualChunks.clear(); state.virtualRevision = null; state.virtualOffset = offset;
+        window.setTimeout(refresh, 0); return;
+      }
+      state.virtualChunks.set(offset, result.items);
+      state.filteredTotal = Number(result.total) || 0;
+      state.virtualOffset = offset;
+      const keep = new Set([offset - state.virtualChunkSize, offset, offset + state.virtualChunkSize]);
+      for (const cachedOffset of state.virtualChunks.keys()) if (!keep.has(cachedOffset)) state.virtualChunks.delete(cachedOffset);
+      state.statuses = result.items;
+      state.alerts = result.items.filter((item) => item.state !== "UP");
+      renderAlerts();
+    } catch (error) {
+      if (queryVersion !== state.statusQueryVersion) return;
+      if (error.status === 409) {
+        state.virtualChunks.clear(); state.virtualRevision = null; state.virtualOffset = offset;
+        window.setTimeout(refresh, 0);
+      } else {
+        refs.backendBanner.hidden = false;
+        refs.backendError.textContent = error instanceof Error ? error.message : "No se pudo consultar el backend.";
+        setConnection("error", "Error consultando monitoreo");
+      }
+    } finally {
+      state.virtualPending.delete(offset);
+    }
+  }
   function renderVirtualRows() {
-    const items = state.filteredAlerts;
+    const total = state.filteredTotal;
     const scroll = $("#monitoring-scroll");
-    if (!items.length) { moveNodes(refs.alertBody, []); state.statusRows.clear(); return; }
+    if (!total) { moveNodes(refs.alertBody, []); state.statusRows.clear(); return; }
     const headerHeight = scroll.querySelector("thead")?.getBoundingClientRect().height || 40;
     let sampleRow = refs.alertBody.querySelector("tr:not(.virtual-spacer)");
-    if (!sampleRow) { sampleRow = statusRow(items[0], 0); refs.alertBody.append(sampleRow); }
-    const measuredHeight = sampleRow.getBoundingClientRect().height || 56;
+    if (!sampleRow && state.statuses.length) { sampleRow = statusRow(state.statuses[0], 0); refs.alertBody.append(sampleRow); }
+    const measuredHeight = sampleRow?.getBoundingClientRect().height || 56;
     const rowHeight = measuredHeight;
     const overscan = 8;
     const visibleCapacity = Math.max(30, Math.ceil(Math.max(0, scroll.clientHeight - headerHeight) / rowHeight) + overscan * 2);
     const requestedStart = Math.floor(Math.max(0, scroll.scrollTop - headerHeight) / rowHeight) - overscan;
-    const start = Math.max(0, Math.min(items.length - visibleCapacity, requestedStart));
-    const end = Math.min(items.length, start + visibleCapacity);
+    const start = Math.max(0, Math.min(total - visibleCapacity, requestedStart));
+    const end = Math.min(total, start + visibleCapacity);
+    state.virtualStart = start;
     if (!state.virtualTop) {
       state.virtualTop = make("tr", "virtual-spacer");
       state.virtualTop.setAttribute("aria-hidden", "true");
@@ -282,21 +348,34 @@
       const bottomCell = make("td"); bottomCell.colSpan = 11; state.virtualBottom.append(bottomCell);
     }
     state.virtualTop.firstElementChild.style.height = `${start * rowHeight}px`;
-    state.virtualBottom.firstElementChild.style.height = `${(items.length - end) * rowHeight}px`;
-    const visible = items.slice(start, end);
-    const rows = visible.map((alert, index) => statusRow(alert, start + index));
+    state.virtualBottom.firstElementChild.style.height = `${(total - end) * rowHeight}px`;
+    const firstChunk = Math.floor(start / state.virtualChunkSize) * state.virtualChunkSize;
+    const lastChunk = Math.floor(Math.max(start, end - 1) / state.virtualChunkSize) * state.virtualChunkSize;
+    for (let offset = firstChunk; offset <= lastChunk; offset += state.virtualChunkSize)
+      if (!state.virtualChunks.has(offset)) fetchVirtualChunk(offset);
+    const visible = [];
+    const rows = [];
+    for (let index = start; index < end; index += 1) {
+      const offset = Math.floor(index / state.virtualChunkSize) * state.virtualChunkSize;
+      const item = state.virtualChunks.get(offset)?.[index - offset];
+      if (item) { visible.push(item); rows.push(statusRow(item, index)); }
+      else {
+        const placeholder = make("tr", "virtual-placeholder"); placeholder.dataset.index = String(index); placeholder.setAttribute("aria-hidden", "true");
+        const cell = make("td"); cell.colSpan = 11; cell.style.height = `${rowHeight}px`; placeholder.append(cell); rows.push(placeholder);
+      }
+    }
     clearHiddenStatusRows(visible);
     moveNodes(refs.alertBody, [state.virtualTop, ...rows, state.virtualBottom]);
   }
   function renderAlerts() {
-    const allFiltered = filteredStatuses().sort(compareAlerts);
-    state.filteredAlerts = allFiltered;
+    const allFiltered = state.statuses;
+    const total = state.filteredTotal;
     const scroll = $("#monitoring-scroll");
     const showAll = state.pageSize === "all";
-    const totalPages = showAll ? 1 : Math.max(1, Math.ceil(allFiltered.length / state.pageSize));
+    const totalPages = showAll ? 1 : Math.max(1, Math.ceil(total / state.pageSize));
     state.page = Math.min(state.page, totalPages - 1);
-    scroll.querySelector(".alerts-table").setAttribute("aria-rowcount", String(allFiltered.length + 1));
-    const virtualized = showAll && allFiltered.length > 250;
+    scroll.querySelector(".alerts-table").setAttribute("aria-rowcount", String(total + 1));
+    const virtualized = showAll && total > 250;
     if (virtualized !== state.virtualized) {
       state.virtualized = virtualized;
       scroll.classList.toggle("is-virtualized", virtualized);
@@ -304,18 +383,18 @@
     }
     let pageItems;
     if (virtualized) {
-      pageItems = allFiltered;
+      pageItems = [];
       renderVirtualRows();
     } else {
-      pageItems = showAll ? allFiltered : allFiltered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
+      pageItems = allFiltered;
       const rowOffset = showAll ? 0 : state.page * state.pageSize;
       const nodes = pageItems.map((alert, index) => statusRow(alert, rowOffset + index));
       clearHiddenStatusRows(pageItems);
       moveNodes(refs.alertBody, nodes);
     }
     const noSources = state.sources.length === 0;
-    const noStatuses = state.statuses.length === 0;
-    refs.tableEmpty.hidden = pageItems.length !== 0;
+    const noStatuses = state.filteredTotal === 0;
+    refs.tableEmpty.hidden = total !== 0;
     if (noSources) {
       refs.tableEmptyTitle.textContent = "Todavía no hay snapshots recibidos";
       refs.tableEmptyText.textContent = "El backend está disponible, pero no tiene fuentes registradas. Esperando el primer webhook periódico.";
@@ -329,17 +408,17 @@
       refs.tableEmptyTitle.textContent = "No hay resultados con esos filtros";
       refs.tableEmptyText.textContent = "Prueba cambiar los criterios o limpiar los filtros.";
     }
-    const start = allFiltered.length ? (showAll ? 1 : state.page * state.pageSize + 1) : 0;
-    const end = showAll ? allFiltered.length : Math.min((state.page + 1) * state.pageSize, allFiltered.length);
-    if (allFiltered.length === state.statuses.length) {
-      setText("#filtered-count", showAll ? `Mostrando todos los ${allFiltered.length} hosts y servicios` : `Mostrando ${start}–${end} de ${allFiltered.length} hosts y servicios`);
+    const start = total ? (showAll ? 1 : state.page * state.pageSize + 1) : 0;
+    const end = showAll ? total : Math.min((state.page + 1) * state.pageSize, total);
+    if (total === (state.stats?.monitoring?.total ?? total)) {
+      setText("#filtered-count", showAll ? `Mostrando todos los ${total} hosts y servicios` : `Mostrando ${start}–${end} de ${total} hosts y servicios`);
     } else {
-      setText("#filtered-count", showAll ? `${allFiltered.length} de ${state.statuses.length} estados coinciden · todos visibles` : `${allFiltered.length} de ${state.statuses.length} estados coinciden`);
+      setText("#filtered-count", showAll ? `${total} estados coinciden · consulta completa bajo demanda` : `${total} estados coinciden`);
     }
-    setText("#alert-count-label", `${state.statuses.length} ${state.statuses.length === 1 ? "elemento" : "elementos"}`);
-    setText("#tab-alert-count", state.statuses.length);
-    const pagination = $("#pagination"); pagination.hidden = showAll || allFiltered.length <= state.pageSize;
-    setText("#page-summary", showAll ? `Todos · ${allFiltered.length} registros` : `Página ${state.page + 1} de ${totalPages} · ${start}–${end} de ${allFiltered.length}`);
+    setText("#alert-count-label", `${total} ${total === 1 ? "elemento" : "elementos"}`);
+    setText("#tab-alert-count", total);
+    const pagination = $("#pagination"); pagination.hidden = showAll || total <= state.pageSize;
+    setText("#page-summary", showAll ? `Todos · ${total} registros (carga por desplazamiento)` : `Página ${state.page + 1} de ${totalPages} · ${start}–${end} de ${total}`);
     $("#page-prev").disabled = state.page <= 0; $("#page-next").disabled = state.page >= totalPages - 1;
     for (const button of $$("[data-sort]")) {
       const selected = button.dataset.sort === state.sort.key;
@@ -352,20 +431,22 @@
     return state.sources.length > 0 && state.sources.every((source) => !sourceIsOffline(source) && source.complete && Array.isArray(source.servers) && source.servers.length > 0 && source.servers.every((server) => server.status === "ok" && !server.stale && !server.removed));
   }
   function renderMetrics() {
-    const count = (predicate) => state.alerts.filter(predicate).length;
-    const critical = count((alert) => alert.state === "CRITICAL");
-    const warning = count((alert) => alert.state === "WARNING");
-    const unknown = count((alert) => alert.state === "UNKNOWN");
-    const down = count((alert) => alert.type === "host" && alert.state === "DOWN");
-    const unreachable = count((alert) => alert.type === "host" && alert.state === "UNREACHABLE");
-    const affectedHosts = new Set(state.alerts.filter((alert) => alert.type === "host" && ["DOWN", "UNREACHABLE"].includes(alert.state)).map((alert) => `${alert.source_id}|${alert.server}|${alert.host}`)).size;
+    const alerts = state.stats?.alerts || {};
+    const byState = alerts.by_state || {};
+    const byStateType = alerts.by_state_and_type || {};
+    const critical = byState.CRITICAL || 0;
+    const warning = byState.WARNING || 0;
+    const unknown = byState.UNKNOWN || 0;
+    const down = byStateType["DOWN:host"] || 0;
+    const unreachable = byStateType["UNREACHABLE:host"] || 0;
+    const affectedHosts = alerts.affected_hosts || 0;
     const online = state.sources.filter((source) => !sourceIsOffline(source)).length;
-    setText("#metric-total", state.alerts.length);
+    setText("#metric-total", alerts.total || 0);
     setText("#metric-critical", critical); setText("#metric-warning", warning); setText("#metric-unknown", unknown);
     setText("#metric-hosts", affectedHosts); setText("#metric-host-detail", `Down ${down} · Unreachable ${unreachable}`);
     setText("#metric-sources", `${online} / ${state.sources.length}`);
     setText("#metric-source-detail", `${state.sources.length - online} offline`);
-    const staleCount = state.alerts.filter((alert) => alert.stale).length;
+    const staleCount = alerts.stale || 0;
     setText("#metric-stale-note", staleCount ? `${staleCount} sin confirmar` : "En todos los servidores");
     const latest = state.sources.map((source) => source.last_received_at).filter(Boolean).sort().at(-1);
     setText("#last-received", latest ? formatDate(latest) : "Sin recepciones");
@@ -379,14 +460,13 @@
   function renderWarning() {
     const issues = [];
     const offline = state.sources.filter(sourceIsOffline).length;
-    const staleItems = state.statuses.filter((item) => item.stale).length;
+    const staleItems = state.stats?.alerts?.stale || 0;
     const failedServers = state.sources.flatMap((source) => (source.servers || []).filter((server) => server.status !== "ok" || server.stale || server.removed).map((server) => ({ source, server })));
     const partial = state.sources.filter((source) => !source.complete).length;
     if (offline) issues.push(`${offline} ${offline === 1 ? "fuente offline" : "fuentes offline"}`);
     if (failedServers.length) issues.push(`${failedServers.length} ${failedServers.length === 1 ? "servidor con error, pendiente o retirado" : "servidores con error, pendientes o retirados"}`);
     if (staleItems) issues.push(`${staleItems} ${staleItems === 1 ? "estado sin confirmar" : "estados sin confirmar"}`);
     else if (partial && !failedServers.length) issues.push(`${partial} ${partial === 1 ? "snapshot parcial" : "snapshots parciales"}`);
-    if (state.pagingWarning) issues.push("la lista cambió mientras se recorrían sus páginas; se volverá a consultar en el próximo ciclo");
     refs.warning.hidden = issues.length === 0;
     if (issues.length) refs.warningText.textContent = `${issues.join(" · ")}. Los datos se conservan, pero no deben interpretarse como estado saludable.`;
   }
@@ -415,7 +495,7 @@
   function updateSourceCard(card, source) {
     card._source = source;
     const servers = Array.isArray(source.servers) ? source.servers : [];
-    const signature = JSON.stringify([source.source, source.peer_ip, source.last_received_at, source.complete, servers.map((server) => [server.name, server.status, server.stale, server.removed])]);
+    const signature = JSON.stringify([source.source, source.peer_ip, source.last_received_at, source.complete, source.alert_count, servers.map((server) => [server.name, server.status, server.stale, server.removed])]);
     if (card.dataset.signature !== signature) {
       card.dataset.signature = signature;
       const r = card._refs;
@@ -441,7 +521,7 @@
     card._refs.remove.hidden = !inactive;
     card._refs.age.textContent = ageText(sourceAge(source));
     card._refs.age.title = `${Math.floor(sourceAge(source))} s desde la última recepción; offline tras ${state.offlineAfter} s`;
-    card._refs.alerts.textContent = String(state.alerts.filter((alert) => Number(alert.source_id) === Number(source.id)).length);
+    card._refs.alerts.textContent = String(source.alert_count || 0);
     return card;
   }
   function renderSources() {
@@ -578,30 +658,35 @@
   function scheduleRefresh() { if (state.timer) window.clearTimeout(state.timer); state.timer = window.setTimeout(async () => { await refresh(); restartPolling(); }, 0); }
 
   $("#filters").addEventListener("submit", (event) => event.preventDefault());
-  function resetMonitoringPosition() { if (state.virtualized) $("#monitoring-scroll").scrollTop = 0; }
-  $("#filters").addEventListener("input", (event) => { if (event.target.matches("input")) { state.page = 0; resetMonitoringPosition(); renderAlerts(); } });
-  $("#filters").addEventListener("change", (event) => { if (event.target.matches("select")) { state.page = 0; resetMonitoringPosition(); renderAlerts(); } });
+  function resetMonitoringPosition() { if (state.virtualized || state.pageSize === "all") $("#monitoring-scroll").scrollTop = 0; }
+  let filterDebounce = null;
+  function applyServerFilters() {
+    resetStatusQuery(); resetMonitoringPosition();
+    if (filterDebounce) window.clearTimeout(filterDebounce);
+    filterDebounce = window.setTimeout(scheduleRefresh, 180);
+  }
+  $("#filters").addEventListener("input", (event) => { if (event.target.matches("input")) applyServerFilters(); });
+  $("#filters").addEventListener("change", (event) => { if (event.target.matches("select")) applyServerFilters(); });
   $("#clear-filters").addEventListener("click", () => {
     for (const selector of ["#filter-host", "#filter-service", "#filter-text", "#filter-severity", "#filter-server", "#filter-backend", "#filter-source", "#filter-ack", "#filter-downtime"]) $(selector).value = "";
-    state.page = 0; resetMonitoringPosition(); renderAlerts(); $("#filter-host").focus();
+    applyServerFilters(); $("#filter-host").focus();
   });
   for (const button of $$("[data-sort]")) button.addEventListener("click", () => {
     const key = button.dataset.sort;
     if (state.sort.key === key) state.sort.direction *= -1;
     else { state.sort.key = key; state.sort.direction = 1; }
-    resetMonitoringPosition();
-    renderAlerts();
+    applyServerFilters();
   });
-  $("#page-prev").addEventListener("click", () => { state.page = Math.max(0, state.page - 1); renderAlerts(); });
-  $("#page-next").addEventListener("click", () => { state.page += 1; renderAlerts(); });
+  $("#page-prev").addEventListener("click", () => { state.page = Math.max(0, state.page - 1); scheduleRefresh(); });
+  $("#page-next").addEventListener("click", () => { state.page += 1; scheduleRefresh(); });
   $("#page-size").addEventListener("change", (event) => {
     const selected = event.target.value;
     const newSize = selected === "all" ? "all" : Number(selected);
     if (![25, 50, 100, 250, "all"].includes(newSize)) return;
-    if (state.pageSize === "all" || newSize === "all") { state.page = 0; $("#monitoring-scroll").scrollTop = 0; }
     state.pageSize = newSize;
+    resetStatusQuery(); resetMonitoringPosition();
     storageSet("naftamon-monitor-page-size", String(newSize));
-    renderAlerts();
+    scheduleRefresh();
   });
   let virtualRenderPending = false;
   function scheduleVirtualRender() {

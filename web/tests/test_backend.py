@@ -1,4 +1,5 @@
 import json
+import gzip
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -198,8 +199,103 @@ def test_request_body_size_limit(app_factory):
     assert response.status_code == 413
 
 
+def test_gzip_webhook_roundtrip_limits_and_compressed_latest_snapshot(client, app_factory):
+    body = snapshot(
+        [alert("CRITICAL", status_information="DISK CRITICAL — revisión ñ ✓")],
+    )
+    body["ok_statuses"] = [ok_status(host="web01", service="http", status_information="OK — servicio disponible ✓")]
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    compressed = gzip.compress(raw, compresslevel=1, mtime=0)
+    response = client.post(
+        "/api/v1/ingest", content=compressed,
+        headers={"content-type": "application/json", "content-encoding": "gzip"},
+    )
+    assert response.status_code == 202
+    assert client.get("/api/v1/alerts").json()["items"][0]["status_information"] == "DISK CRITICAL — revisión ñ ✓"
+    assert client.get("/api/v1/statuses", params={"state": "UP"}).json()["items"][0]["status_information"] == "OK — servicio disponible ✓"
+    with sqlite3.connect(client.app.state.settings.database_path) as db:
+        stored, encoding, compact = db.execute(
+            "SELECT payload_gzip, payload_encoding, payload_json FROM latest_snapshots"
+        ).fetchone()
+    assert encoding == "gzip-json" and compact == "{}"
+    assert json.loads(gzip.decompress(stored)) == body
+
+    limited = app_factory(max_compressed_request_bytes=128, max_decompressed_request_bytes=256)
+    with TestClient(limited) as limited_client:
+        bomb = gzip.compress(b" " * 4096, compresslevel=9)
+        rejected = limited_client.post(
+            "/api/v1/ingest", content=bomb,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        assert rejected.status_code == 413
+        unsupported = limited_client.post(
+            "/api/v1/ingest", content=b"{}",
+            headers={"content-type": "application/json", "content-encoding": "br"},
+        )
+        assert unsupported.status_code == 415
+
+
+def test_statuses_server_pagination_search_global_stats_and_revision(client):
+    timestamp = "2026-10-14T22:00:00Z"
+    body = snapshot([
+        alert("CRITICAL", host="edge-a", service="disk", acknowledged=True,
+              downtime=False, status_information="DISK CRITICAL — conexión rehusada"),
+        alert("WARNING", host="edge-b", service="http", downtime=True,
+              status_information="HTTP response slow"),
+        alert("UNKNOWN", host="edge-c", service="worker"),
+        alert("DOWN", host="edge-d", service=""),
+        alert("UNREACHABLE", host="edge-e", service=""),
+    ], timestamp=timestamp)
+    body["ok_statuses"] = [ok_status(host="edge-f", service="")]
+    assert client.post("/api/v1/ingest", json=body).status_code == 202
+
+    page = client.get("/api/v1/statuses", params={"limit": 2, "offset": 1, "sort": "host"}).json()
+    assert page["total"] == 6 and page["limit"] == 2 and len(page["items"]) == 2
+    assert [row["host"] for row in page["items"]] == ["edge-b", "edge-c"]
+    assert client.get("/api/v1/statuses", params={"query": "CONEXION REHUSADA"}).json()["total"] == 1
+    assert client.get("/api/v1/statuses", params={"host_query": "edge-a", "acknowledged": "true"}).json()["total"] == 1
+    assert client.get("/api/v1/statuses", params={"service_query": "ht", "downtime": "true"}).json()["total"] == 1
+    assert client.get("/api/v1/statuses", params={"revision": page["revision"] - 1}).status_code == 409
+
+    stats = client.get("/api/v1/stats").json()
+    assert stats["alerts"]["scope"] == "global_unfiltered_active_alerts"
+    assert stats["alerts"]["total"] == 5
+    assert stats["alerts"]["by_state"] == {"CRITICAL": 1, "WARNING": 1, "UNKNOWN": 1, "DOWN": 1, "UNREACHABLE": 1}
+    assert stats["alerts"]["by_state_and_type"]["DOWN:host"] == 1
+    assert stats["alerts"]["by_state_and_type"]["UNREACHABLE:host"] == 1
+    assert stats["monitoring"]["scope"] == "global_unfiltered_current_monitoring"
+    assert stats["monitoring"]["total"] == 6
+    assert stats["monitoring"]["by_state"]["UP"] == 1
+
+
+def test_large_snapshot_streams_statuses_and_rejects_duplicate_identity(client):
+    detail = "Disk OK — revisión ñ ✓ " * 60
+    statuses = [
+        ok_status(host=f"stream-node-{index:05d}", service="", status_information=detail)
+        for index in range(1500)
+    ]
+    body = snapshot([], timestamp="2026-10-14T22:00:00Z")
+    body["ok_statuses"] = statuses
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(raw) > 1024 * 1024
+    response = client.post("/api/v1/ingest", content=raw, headers={"content-type": "application/json"})
+    assert response.status_code == 202, response.text
+    page = client.get("/api/v1/statuses", params={"query": "REVISION", "limit": 25}).json()
+    assert page["total"] == 1500 and len(page["items"]) == 25
+    assert page["items"][0]["status_information"] == detail
+
+    duplicate = dict(statuses[0])
+    body["timestamp"] = "2026-10-14T22:01:00Z"
+    body["ok_statuses"].append(duplicate)
+    invalid = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    rejected = client.post("/api/v1/ingest", content=invalid, headers={"content-type": "application/json"})
+    assert rejected.status_code == 422
+    assert client.get("/api/v1/statuses", params={"state": "UP"}).json()["total"] == 1500
+
+
 def test_repeated_snapshot_refreshes_source_without_duplicate_alert_or_history(client):
     body = snapshot([alert()])
+    body["ok_statuses"] = [ok_status(host="web01", service="http")]
     first = client.post("/api/v1/ingest", json=body)
     time.sleep(0.02)
     second = client.post("/api/v1/ingest", json=body)
@@ -207,6 +303,8 @@ def test_repeated_snapshot_refreshes_source_without_duplicate_alert_or_history(c
     assert client.get("/api/v1/alerts").json()["total"] == 1
     history = client.get("/api/v1/history").json()["items"]
     assert [item["event"] for item in history] == ["opened"]
+    status = client.get("/api/v1/statuses", params={"host": "web01"}).json()["items"][0]
+    assert status["last_seen_at"] == second.json()["received_at"]
     source = client.get("/api/v1/sources").json()["items"][0]
     assert source["last_received_at"] >= first.json()["received_at"]
 
@@ -524,7 +622,7 @@ def test_schema_v6_migration_adds_source_tombstone_without_losing_notification_e
 
     initialize(database_path)
     with connect(database_path) as db:
-        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 12
         assert db.execute("SELECT id FROM notification_events WHERE id='legacy-event'").fetchone()[0] == "legacy-event"
         assert "deleted_at" in {row["name"] for row in db.execute("PRAGMA table_info(sources)")}
 

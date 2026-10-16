@@ -27,6 +27,9 @@
 #include <QToolButton>
 #include <cstdio>
 #include <cstdlib>
+#ifdef Q_OS_LINUX
+#include <sys/resource.h>
+#endif
 
 static int failures = 0;
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
@@ -234,6 +237,8 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     gateway.configure(true, sinkUrl, 1);
     CHECK(waitUntil([&] { return delivered >= 1; }, 2000));
     CHECK(lastStatus == 202);
+    CHECK(sinkStats(base).value("last_content_encoding").toString() == "gzip");
+    CHECK(sinkStats(base).value("last_body_bytes").toInt() < sinkStats(base).value("last_decoded_bytes").toInt());
     QJsonArray records = receivedWebhooks(base);
     CHECK(sinkStats(base).value("total").toInt() > before && !records.isEmpty());
     QJsonObject payload = records.last().toObject();
@@ -352,6 +357,21 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(sinkStats(base).value("total").toInt() == legacyRequestsAfterFallback + 1);
     compatibility.configure(false, legacyUrl, 60);
 
+    // A receiver predating Content-Encoding returns 400; retry the same snapshot as JSON.
+    WebhookGateway oldReceiver(nullptr, 1000);
+    oldReceiver.setServers({&thruk});
+    int oldReceiverDelivered = 0;
+    QObject::connect(&oldReceiver, &WebhookGateway::delivered, &oldReceiver,
+                     [&](int) { ++oldReceiverDelivered; });
+    const int oldTotalBefore = sinkStats(base).value("total").toInt();
+    const int gzipRejectedBefore = sinkStats(base).value("gzip_rejected").toInt();
+    oldReceiver.configure(true, base + "/old", 60);
+    CHECK(waitUntil([&] { return oldReceiverDelivered == 1; }, 1500));
+    CHECK(sinkStats(base).value("total").toInt() == oldTotalBefore + 2);
+    CHECK(sinkStats(base).value("gzip_rejected").toInt() == gzipRejectedBefore + 1);
+    CHECK(sinkStats(base).value("last_content_encoding").toString() == "identity");
+    oldReceiver.configure(false, base + "/old", 60);
+
     gateway.configure(true, sinkUrl + "?status=500", 1);
     CHECK(waitUntil([&] { return failed >= 1; }, 1500));
     CHECK(lastStatus == 500);
@@ -426,7 +446,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     large.configure(true, sinkUrl + "?quiet=1", 60);
     CHECK(waitUntil([&] { return largeDelivered == 1; }, 5000));
     large.configure(false, sinkUrl, 60);
-    const int largeBytes = sinkStats(base).value("last_body_bytes").toInt();
+    const int largeBytes = sinkStats(base).value("last_decoded_bytes").toInt();
     CHECK(largeBytes > 1024 * 1024 && largeBytes < 8 * 1024 * 1024);
     const QJsonObject largePayload = receivedWebhooks(base).last().toObject();
     CHECK(largePayload.value("alerts").toArray().size() == 7000);
@@ -440,6 +460,141 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore + 1; }, 1300));
     slow.configure(false, sinkUrl, 1);
     CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore + 1; }, 1200));
+
+    if (qEnvironmentVariableIsSet("NAFTAMON_SCALE_GATEWAY_TEST")) {
+        bulk.raw.hosts.clear(); bulk.raw.hosts.squeeze();
+        bulk.raw.services.clear(); bulk.raw.services.squeeze();
+        bulk.raw.okStatuses.clear(); bulk.raw.okStatuses.squeeze();
+        bulk.raw.hosts.reserve(14);
+        bulk.raw.services.reserve(134);
+        bulk.raw.okStatuses.reserve(165950);
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        for (int n = 0; n < 165950; ++n) {
+            const bool host = n % 4 == 0;
+            Item item = svc("scale-node-" + QString::number(n).rightJustified(6, '0'),
+                            host ? QString() : "check-" + QString::number(n % 37).rightJustified(2, '0'), UP);
+            item.server = "bulk";
+            item.backend = "scale-lab";
+            item.output = QString::fromUtf8("OK: all checks pass — revisión ñ ✓");
+            item.lastCheck = now;
+            item.lastChange = now - 3600;
+            bulk.raw.okStatuses.append(item);
+        }
+        const QVector<QPair<State, int>> alertGroups = {
+            {CRITICAL, 80}, {WARNING, 40}, {UNKNOWN, 14}, {DOWN, 8}, {UNREACHABLE, 6}
+        };
+        int alertIndex = 0;
+        for (const auto &group : alertGroups) {
+            for (int n = 0; n < group.second; ++n, ++alertIndex) {
+                const bool host = group.first == DOWN || group.first == UNREACHABLE;
+                Item item = svc("scale-alert-" + QString::number(alertIndex).rightJustified(3, '0'),
+                                host ? QString() : "check-" + QString::number(n % 11).rightJustified(2, '0'),
+                                group.first);
+                item.server = "bulk";
+                item.backend = "scale-lab";
+                item.output = QString::fromUtf8("Synthetic alert — threshold exceeded ✓");
+                item.ack = alertIndex % 7 == 0;
+                item.downtime = alertIndex % 13 == 0;
+                item.lastCheck = now;
+                item.lastChange = now - 3600;
+                if (host) bulk.raw.hosts.append(item);
+                else bulk.raw.services.append(item);
+            }
+        }
+        const QVector<Item> desktopDefaultVisible = applyFilters(bulk.raw, Filters{}, now);
+        Filters hideAcknowledged;
+        hideAcknowledged.acknowledged = true;
+        Filters hideDowntime;
+        hideDowntime.downtime = true;
+        const QVector<Item> desktopAckFiltered = applyFilters(bulk.raw, hideAcknowledged, now);
+        const QVector<Item> desktopDowntimeFiltered = applyFilters(bulk.raw, hideDowntime, now);
+        CHECK(desktopDefaultVisible.size() == 148);
+        CHECK(desktopAckFiltered.size() == 126);
+        CHECK(desktopDowntimeFiltered.size() == 136);
+
+        WebhookGateway scale(nullptr, 60000);
+        scale.setServers({&bulk});
+        int scaleDelivered = 0;
+        qint64 rawBytes = 0, wireBytes = 0, buildMs = 0, serializeMs = 0, gzipMs = 0;
+        QObject::connect(&scale, &WebhookGateway::delivered, &scale, [&](int) { ++scaleDelivered; });
+        QObject::connect(&scale, &WebhookGateway::snapshotPrepared, &scale,
+                         [&](qint64 raw, qint64 wire, qint64 build, qint64 serialize, qint64 gzip) {
+            rawBytes = raw; wireBytes = wire; buildMs = build; serializeMs = serialize; gzipMs = gzip;
+        });
+        int guiHeartbeats = 0, heartbeatsAtPreparation = -1;
+        QTimer heartbeat;
+        heartbeat.setInterval(10);
+        QObject::connect(&heartbeat, &QTimer::timeout, &scale, [&] { ++guiHeartbeats; });
+        QObject::connect(&scale, &WebhookGateway::snapshotPrepared, &scale,
+                         [&](qint64, qint64, qint64, qint64, qint64) {
+            heartbeatsAtPreparation = guiHeartbeats;
+        });
+        heartbeat.start();
+        QElapsedTimer endToEnd;
+        endToEnd.start();
+        scale.configure(true, sinkUrl + "?quiet=1&summary=1", 60);
+        CHECK(waitUntil([&] { return scaleDelivered == 1; }, 60000));
+        scale.configure(false, sinkUrl, 60);
+        const QJsonObject summary = receivedWebhooks(base).last().toObject();
+        const QJsonObject stats = sinkStats(base);
+        CHECK(summary.value("summary").toBool());
+        CHECK(summary.value("alerts").toInt() == 148);
+        const QJsonObject alertStates = summary.value("alert_states").toObject();
+        const QJsonObject alertTypes = summary.value("alert_types").toObject();
+        const QJsonObject statusTypes = summary.value("status_types").toObject();
+        CHECK(alertStates.value("CRITICAL").toInt() == 80);
+        CHECK(alertStates.value("WARNING").toInt() == 40);
+        CHECK(alertStates.value("UNKNOWN").toInt() == 14);
+        CHECK(alertStates.value("DOWN").toInt() == 8);
+        CHECK(alertStates.value("UNREACHABLE").toInt() == 6);
+        CHECK(alertTypes.value("host").toInt() == 14 && alertTypes.value("service").toInt() == 134);
+        CHECK(summary.value("alert_acknowledged").toInt() == 22);
+        CHECK(summary.value("alert_downtime").toInt() == 12);
+        CHECK(summary.value("ok_statuses").toInt() == 165950);
+        CHECK(statusTypes.value("host").toInt() == 41488);
+        CHECK(statusTypes.value("service").toInt() == 124462);
+        CHECK(summary.value("unique_alerts").toInt() == 148);
+        CHECK(summary.value("unique_ok_statuses").toInt() == 165950);
+        CHECK(summary.value("identity_overlap").toInt() == 0);
+        CHECK(summary.value("first_status_information").toString() ==
+              QString::fromUtf8("OK: all checks pass — revisión ñ ✓"));
+        CHECK(summary.value("last_status_information").toString() ==
+              QString::fromUtf8("OK: all checks pass — revisión ñ ✓"));
+        CHECK(!summary.value("wire_contains_secret").toBool());
+        CHECK(heartbeatsAtPreparation >= 2);  // the Qt event loop stayed responsive while encoding
+        CHECK(stats.value("last_content_encoding").toString() == "gzip");
+        CHECK(stats.value("last_decoded_bytes").toInt() == rawBytes);
+        CHECK(stats.value("last_body_bytes").toInt() == wireBytes);
+        std::printf("Desktop counts: raw_alerts=148, default_visible=%lld, ack_filtered=%lld, downtime_filtered=%lld, UP=165950\n",
+                    static_cast<long long>(desktopDefaultVisible.size()),
+                    static_cast<long long>(desktopAckFiltered.size()),
+                    static_cast<long long>(desktopDowntimeFiltered.size()));
+        std::printf("Desktop Gateway scale: alerts=148, UP=165950, json=%lld bytes, gzip=%lld bytes, "
+                    "build=%lld ms, serialize=%lld ms, gzip=%lld ms, delivered=%lld ms, gui_ticks=%d\n",
+                    (long long)rawBytes, (long long)wireBytes, (long long)buildMs,
+                    (long long)serializeMs, (long long)gzipMs, (long long)endToEnd.elapsed(),
+                    heartbeatsAtPreparation);
+        heartbeat.stop();
+#ifdef Q_OS_LINUX
+        rusage usage{};
+        if (getrusage(RUSAGE_SELF, &usage) == 0)
+            std::printf("Desktop test process peak RSS: %ld KiB\n", usage.ru_maxrss);
+#endif
+        const QString webUrl = qEnvironmentVariable("NAFTAMON_SCALE_WEB_URL");
+        if (!webUrl.isEmpty()) {
+            WebhookGateway toWeb(nullptr, 60000);
+            toWeb.setServers({&bulk});
+            int acceptedByWeb = 0, rejectedByWeb = 0;
+            QObject::connect(&toWeb, &WebhookGateway::delivered, &toWeb,
+                             [&](int) { ++acceptedByWeb; });
+            QObject::connect(&toWeb, &WebhookGateway::deliveryFailed, &toWeb,
+                             [&](int) { ++rejectedByWeb; });
+            toWeb.configure(true, webUrl, 60);
+            CHECK(waitUntil([&] { return acceptedByWeb == 1 || rejectedByWeb > 0; }, 60000));
+            toWeb.configure(false, webUrl, 60);
+            std::printf("Desktop -> Web integration: HTTP 202=%s\n", acceptedByWeb == 1 ? "PASS" : "FAIL");
+        }
+    }
 }
 
 static void gatewayUiTests(const QString &thrukUrl, const QString &sinkUrl) {

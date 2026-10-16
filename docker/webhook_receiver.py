@@ -2,15 +2,19 @@
 """Local lab sink: print received JSON to container logs, one record per line."""
 
 import json
+import gzip
 import threading
 import time
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 received = []
 received_lock = threading.Lock()
-stats = {"total": 0, "active": 0, "max_active": 0, "last_body_bytes": 0}
+stats = {"total": 0, "active": 0, "max_active": 0, "last_body_bytes": 0,
+         "last_decoded_bytes": 0, "last_content_encoding": "identity"}
 MAX_BODY_BYTES = 8 * 1024 * 1024
+MAX_DECODED_BYTES = 128 * 1024 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -28,14 +32,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = urlparse(self.path)
-        if route.path not in ("/webhook", "/legacy"):
+        if route.path not in ("/webhook", "/legacy", "/old"):
             return self.reply(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 1 or length > MAX_BODY_BYTES:
-                return self.reply(413, {"error": "JSON body must be 1 byte to 8 MiB"})
-            payload = json.loads(self.rfile.read(length))
-        except (ValueError, UnicodeDecodeError):
+                return self.reply(413, {"error": "Request body must be 1 byte to 8 MiB"})
+            body = self.rfile.read(length)
+            encoding = self.headers.get("Content-Encoding", "identity").lower()
+            if route.path == "/old" and encoding == "gzip":
+                with received_lock:
+                    stats["total"] += 1
+                    stats["gzip_rejected"] = stats.get("gzip_rejected", 0) + 1
+                    stats["last_body_bytes"] = length
+                    stats["last_content_encoding"] = encoding
+                return self.reply(400, {"error": "legacy receiver does not support gzip"})
+            if encoding == "gzip":
+                body = gzip.decompress(body)
+            elif encoding not in ("", "identity"):
+                return self.reply(415, {"error": "unsupported content encoding"})
+            if len(body) > MAX_DECODED_BYTES:
+                return self.reply(413, {"error": "decoded JSON body exceeds 128 MiB"})
+            payload = json.loads(body)
+        except (ValueError, UnicodeDecodeError, OSError):
             return self.reply(400, {"error": "invalid JSON"})
         options = parse_qs(route.query)
         try:
@@ -48,6 +67,8 @@ class Handler(BaseHTTPRequestHandler):
             stats["active"] += 1
             stats["max_active"] = max(stats["max_active"], stats["active"])
             stats["last_body_bytes"] = length
+            stats["last_decoded_bytes"] = len(body)
+            stats["last_content_encoding"] = encoding or "identity"
         try:
             if delay:
                 time.sleep(delay)
@@ -67,6 +88,33 @@ class Handler(BaseHTTPRequestHandler):
             if status != 202:
                 return self.reply(status, {"received": False})
             with received_lock:
+                if options.get("summary") == ["1"]:
+                    alerts = payload.get("alerts", [])
+                    statuses = payload.get("ok_statuses", [])
+                    alert_keys = {
+                        (row.get("server"), row.get("backend"), row.get("type"), row.get("host"), row.get("service"))
+                        for row in alerts
+                    }
+                    status_keys = {
+                        (row.get("server"), row.get("backend"), row.get("type"), row.get("host"), row.get("service"))
+                        for row in statuses
+                    }
+                    payload = {
+                        "summary": True,
+                        "alerts": len(alerts),
+                        "alert_states": dict(Counter(row.get("state") for row in alerts)),
+                        "alert_types": dict(Counter(row.get("type") for row in alerts)),
+                        "alert_acknowledged": sum(bool(row.get("acknowledged")) for row in alerts),
+                        "alert_downtime": sum(bool(row.get("downtime")) for row in alerts),
+                        "ok_statuses": len(statuses),
+                        "status_types": dict(Counter(row.get("type") for row in statuses)),
+                        "unique_alerts": len(alert_keys),
+                        "unique_ok_statuses": len(status_keys),
+                        "identity_overlap": len(alert_keys & status_keys),
+                        "first_status_information": statuses[0].get("status_information") if statuses else None,
+                        "last_status_information": statuses[-1].get("status_information") if statuses else None,
+                        "wire_contains_secret": b'"secret"' in body,
+                    }
                 received.append(payload)
                 del received[:-10]
             if options.get("quiet") != ["1"]:

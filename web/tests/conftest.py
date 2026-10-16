@@ -12,10 +12,12 @@ def app_factory(tmp_path: Path):
     def factory(**overrides):
         settings = Settings(
             database_path=overrides.pop("database_path", tmp_path / "naftamon-test.sqlite3"),
-            max_request_bytes=overrides.pop("max_request_bytes", 8 * 1024 * 1024),
+            max_request_bytes=overrides.pop("max_request_bytes", 64 * 1024 * 1024),
             offline_after_seconds=overrides.pop("offline_after_seconds", 900),
             source_inactive_after_seconds=overrides.pop("source_inactive_after_seconds", 86400),
             history_retention_days=overrides.pop("history_retention_days", 90),
+            max_compressed_request_bytes=overrides.pop("max_compressed_request_bytes", 8 * 1024 * 1024),
+            max_decompressed_request_bytes=overrides.pop("max_decompressed_request_bytes", 128 * 1024 * 1024),
         )
         return create_app(settings=settings)
     return factory

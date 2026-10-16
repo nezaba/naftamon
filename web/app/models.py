@@ -81,9 +81,9 @@ class Snapshot(StrictModel):
     source: Literal["NaftaMon"]
     complete: StrictBool
     servers: list[ServerStatus] = Field(max_length=1000)
-    alerts: list[Alert] = Field(max_length=100000)
+    alerts: list[Alert] = Field(max_length=200000)
     # None distinguishes a legacy snapshot from a new authoritative empty list.
-    ok_statuses: list[OkStatus] | None = Field(default=None, max_length=100000)
+    ok_statuses: list[OkStatus] | None = Field(default=None, max_length=200000)
 
     _check_timestamp = field_validator("timestamp")(validate_timestamp)
 
@@ -108,17 +108,20 @@ class Snapshot(StrictModel):
         for status in self.ok_statuses or []:
             if server_status.get(status.server) != "ok":
                 raise ValueError("ok_statuses may only be included for a server with status ok")
-        alert_keys = [
-            (a.server, a.backend, a.type, a.host, a.service)
-            for a in self.alerts
-        ]
-        if len(set(alert_keys)) != len(alert_keys):
-            raise ValueError("alerts must have unique composite identities")
-        status_keys = [(s.server, s.backend, s.type, s.host, s.service) for s in self.ok_statuses or []]
-        if len(set(status_keys)) != len(status_keys):
-            raise ValueError("ok_statuses must have unique composite identities")
-        if set(alert_keys).intersection(status_keys):
-            raise ValueError("alerts and ok_statuses must not share composite identities")
+        alert_keys = set()
+        for alert in self.alerts:
+            key = (alert.server, alert.backend, alert.type, alert.host, alert.service)
+            if key in alert_keys:
+                raise ValueError("alerts must have unique composite identities")
+            alert_keys.add(key)
+        status_keys = set()
+        for status in self.ok_statuses or []:
+            key = (status.server, status.backend, status.type, status.host, status.service)
+            if key in status_keys:
+                raise ValueError("ok_statuses must have unique composite identities")
+            if key in alert_keys:
+                raise ValueError("alerts and ok_statuses must not share composite identities")
+            status_keys.add(key)
         return self
 
 
