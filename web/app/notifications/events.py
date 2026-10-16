@@ -56,6 +56,8 @@ def record_transition(
         "timestamp": occurred_at,
         "event_type": event_type,
     }
+    if "status_information" in alert and alert["status_information"] is not None:
+        context["status_information"] = alert["status_information"]
     event_id = stable_event_id(
         source_id, alert["server"], alert["backend"], alert["type"], alert["host"],
         alert["service"], episode_id, revision, event_type,

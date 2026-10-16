@@ -25,9 +25,18 @@ void WebhookGateway::configure(bool enabled, const QString &url, int intervalSec
     const QUrl nextUrl(url.trimmed());
     const int nextInterval = qBound(1, intervalSeconds, 86400);
     const bool nextEnabled = enabled && isValidUrl(url);
-    if (enabled_ == nextEnabled && url_ == nextUrl && intervalSeconds_ == nextInterval) return;
+    if (enabled_ == nextEnabled && url_ == nextUrl && intervalSeconds_ == nextInterval) {
+        // Saving settings explicitly lets a receiver that was upgraded in place
+        // be probed again for support of the extended snapshot fields.
+        if (enabled_ && legacyPayloadMode_) {
+            legacyPayloadMode_ = false;
+            if (!inFlight_) QTimer::singleShot(0, this, &WebhookGateway::sendNow);
+        }
+        return;
+    }
     cancelInFlight();
     timer_.stop();
+    legacyPayloadMode_ = false;
     enabled_ = nextEnabled;
     url_ = nextUrl;
     intervalSeconds_ = nextInterval;
@@ -51,7 +60,7 @@ void WebhookGateway::cancelInFlight() {
     emit requestFinished(QDateTime::currentDateTime(), false, 0, "Cancelled", QString());
 }
 
-static QJsonObject alertJson(const Item &item) {
+static QJsonObject itemJson(const Item &item) {
     auto utc = [](qint64 epoch) { return QDateTime::fromSecsSinceEpoch(epoch, Qt::UTC).toString(Qt::ISODate); };
     QJsonObject alert;
     alert["server"] = item.server;
@@ -60,6 +69,7 @@ static QJsonObject alertJson(const Item &item) {
     alert["service"] = item.service;
     alert["type"] = item.isHost() ? "host" : "service";
     alert["state"] = stateName(item.state);
+    alert["status_information"] = item.output;
     alert["hard"] = item.hard;
     alert["acknowledged"] = item.ack;
     alert["downtime"] = item.downtime;
@@ -69,25 +79,42 @@ static QJsonObject alertJson(const Item &item) {
 }
 
 QJsonObject WebhookGateway::snapshot() const {
-    QJsonArray statuses, alerts;
+    QJsonArray serverStatuses, alerts, okStatuses;
     bool complete = !servers_.isEmpty();
     for (const auto &server : servers_) {
         if (!server) { complete = false; continue; }
         const QString status = !server->error.isEmpty() ? "error" : server->hasData ? "ok" : "pending";
-        statuses.append(QJsonObject{{"server", server->conf.name}, {"status", status}});
+        serverStatuses.append(QJsonObject{{"server", server->conf.name}, {"status", status}});
         if (status != "ok") { complete = false; continue; }
         for (const auto *list : {&server->raw.hosts, &server->raw.services})
             for (const Item &item : *list)
-                if (item.state != UP) alerts.append(alertJson(item));
+                if (item.state != UP) alerts.append(itemJson(item));
+        for (const Item &item : server->raw.okStatuses)
+            if (item.state == UP) okStatuses.append(itemJson(item));
     }
     return {{"timestamp", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
             {"source", "NaftaMon"}, {"complete", complete},
-            {"servers", statuses}, {"alerts", alerts}};
+            {"servers", serverStatuses}, {"alerts", alerts}, {"ok_statuses", okStatuses}};
+}
+
+QJsonObject WebhookGateway::legacyCompatiblePayload(QJsonObject payload) {
+    payload.remove("ok_statuses");
+    QJsonArray alerts = payload.value("alerts").toArray();
+    for (qsizetype i = 0; i < alerts.size(); ++i) {
+        QJsonObject alert = alerts.at(i).toObject();
+        alert.remove("status_information");
+        alerts.replace(i, alert);
+    }
+    payload["alerts"] = alerts;
+    return payload;
 }
 
 void WebhookGateway::sendNow() {
     if (!enabled_ || inFlight_) return;
-    post(url_, snapshot(), false);
+    QJsonObject payload = snapshot();
+    const bool allowFallback = !legacyPayloadMode_;
+    if (legacyPayloadMode_) payload = legacyCompatiblePayload(payload);
+    post(url_, payload, false, allowFallback);
 }
 
 bool WebhookGateway::testWebhook(const QString &url) {
@@ -99,7 +126,8 @@ bool WebhookGateway::testWebhook(const QString &url) {
     return post(QUrl(url.trimmed()), payload, true);
 }
 
-bool WebhookGateway::post(const QUrl &url, const QJsonObject &payload, bool test) {
+bool WebhookGateway::post(const QUrl &url, const QJsonObject &payload, bool test,
+                          bool allowCompatibilityFallback) {
     QPointer<QNetworkReply> &active = test ? testInFlight_ : inFlight_;
     if (active) return false;
     QNetworkRequest request(url);
@@ -110,12 +138,25 @@ bool WebhookGateway::post(const QUrl &url, const QJsonObject &payload, bool test
     QNetworkReply *reply = network_.post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     active = reply;
     QTimer::singleShot(timeoutMs_, reply, [reply] { if (reply->isRunning()) reply->abort(); });
-    connect(reply, &QNetworkReply::finished, this, [this, reply, test] {
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, test, url, payload, allowCompatibilityFallback] {
         reply->deleteLater();
         QPointer<QNetworkReply> &current = test ? testInFlight_ : inFlight_;
         if (current != reply) return;
         current = nullptr;
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        bool rejectedExtensions = false;
+        if (!test && allowCompatibilityFallback && status == 422) {
+            const QByteArray body = reply->readAll();
+            rejectedExtensions = body.contains("ok_statuses") || body.contains("status_information");
+        }
+        if (rejectedExtensions) {
+            // Older NaftaMon Web versions reject unknown fields. Retry the same
+            // snapshot without additions and keep that shape for this destination.
+            legacyPayloadMode_ = true;
+            post(url, legacyCompatiblePayload(payload), false);
+            return;
+        }
         const bool success = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300;
         const QString error = success ? QString() :
             reply->error() == QNetworkReply::NoError ? QString("HTTP %1").arg(status) : reply->errorString();

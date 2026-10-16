@@ -4,13 +4,13 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const state = {
-    alerts: [], sources: [], offlineAfter: 900, historyItems: [], historyTotal: 0,
-    pollMs: 5000, timer: null, refreshing: false, lastSuccess: null,
-    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50,
+    alerts: [], statuses: [], sources: [], offlineAfter: 900, inactiveAfter: 86400, historyItems: [], historyTotal: 0,
+    pollMs: 5000, timer: null, refreshing: false, refreshPending: false, lastSuccess: null,
+    sort: { key: "state", direction: 1 }, page: 0, pageSize: 50, filteredAlerts: [], virtualized: false, virtualTop: null, virtualBottom: null,
     historyPage: 0, historyPageSize: 50, activeView: "alerts", sourceClocks: new Map(), pagingWarning: false,
-    alertRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
+    statusRows: new Map(), sourceCards: new Map(), historyRows: new Map(),
   };
-  const stateOrder = { CRITICAL: 0, DOWN: 1, UNREACHABLE: 2, WARNING: 3, UNKNOWN: 4 };
+  const stateOrder = { CRITICAL: 0, DOWN: 1, UNREACHABLE: 2, WARNING: 3, UNKNOWN: 4, UP: 5 };
   const refs = {
     connection: $("#connection-state"), connectionLabel: $("#connection-label"),
     backendBanner: $("#backend-banner"), backendError: $("#backend-error-text"),
@@ -41,12 +41,20 @@
     if (hours < 24) return `Hace ${hours} h ${minutes % 60} min`;
     return `Hace ${Math.floor(hours / 24)} d ${hours % 24} h`;
   }
+  function durationLabel(seconds) {
+    const value = Math.max(1, Math.floor(Number(seconds) || 0));
+    if (value % 86400 === 0) return `${value / 86400} d`;
+    if (value % 3600 === 0) return `${value / 3600} h`;
+    if (value % 60 === 0) return `${value / 60} min`;
+    return `${value} s`;
+  }
   function sourceAge(source) {
     const clock = state.sourceClocks.get(source.id);
     if (clock) return Math.max(0, clock.age + (Date.now() - clock.at) / 1000);
     return Math.max(0, Number(source.age_seconds) || 0);
   }
   function sourceIsOffline(source) { return Boolean(source.offline) || sourceAge(source) > state.offlineAfter; }
+  function sourceIsInactive(source) { return sourceAge(source) > state.inactiveAfter; }
   function setConnection(kind, label) { refs.connection.dataset.state = kind; refs.connectionLabel.textContent = label; }
   function updateTheme(theme) {
     const selected = theme === "light" ? "light" : "dark";
@@ -68,8 +76,8 @@
     select.value = entries.some((entry) => String(entry.value) === current) ? current : "";
   }
   function updateFilterOptions() {
-    const servers = [...new Set([...state.alerts.map((alert) => alert.server), ...state.sources.flatMap((source) => (source.servers || []).map((server) => server.name))])].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
-    const backends = [...new Set(state.alerts.map((alert) => alert.backend).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const servers = [...new Set([...state.statuses.map((item) => item.server), ...state.sources.flatMap((source) => (source.servers || []).map((server) => server.name))])].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+    const backends = [...new Set(state.statuses.map((item) => item.backend).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
     const sourceValues = [...new Map(state.sources.map((source) => [String(source.id), { value: source.id, label: `${source.source} · ${source.peer_ip}` }])).values()]
       .sort((a, b) => a.label.localeCompare(b.label, "es", { sensitivity: "base" }));
     syncSelect($("#filter-server"), servers.map((value) => ({ value, label: value })), "Todos");
@@ -92,18 +100,18 @@
       throw error;
     } finally { window.clearTimeout(timer); }
   }
-  async function fetchAllAlerts() {
+  async function fetchAllStatuses() {
     const limit = 500;
-    const first = await getJSON(`/api/v1/alerts?limit=${limit}&offset=0`);
-    if (!Array.isArray(first.items)) throw new Error("La API de alertas devolvió un formato inesperado.");
+    const first = await getJSON(`/api/v1/statuses?limit=${limit}&offset=0`);
+    if (!Array.isArray(first.items)) throw new Error("La API de monitoreo devolvió un formato inesperado.");
     const expected = Number(first.total) || 0;
     const rows = new Map(first.items.map((item) => [String(item.id), item]));
     const offsets = [];
     for (let offset = limit; offset < expected; offset += limit) offsets.push(offset);
     for (let index = 0; index < offsets.length; index += 4) {
-      const pages = await Promise.all(offsets.slice(index, index + 4).map((offset) => getJSON(`/api/v1/alerts?limit=${limit}&offset=${offset}`)));
+      const pages = await Promise.all(offsets.slice(index, index + 4).map((offset) => getJSON(`/api/v1/statuses?limit=${limit}&offset=${offset}`)));
       for (const page of pages) {
-        if (!Array.isArray(page.items)) throw new Error("La API devolvió una página de alertas inválida.");
+        if (!Array.isArray(page.items)) throw new Error("La API devolvió una página de monitoreo inválida.");
         for (const item of page.items) rows.set(String(item.id), item);
       }
     }
@@ -119,18 +127,20 @@
     renderHistory();
   }
   async function refresh() {
-    if (state.refreshing) return;
+    if (state.refreshing) { state.refreshPending = true; return; }
     state.refreshing = true;
     setConnection("loading", "Actualizando datos");
     try {
-      const [health, sourceResult, alertResult] = await Promise.all([
-        getJSON("/healthz"), getJSON("/api/v1/sources"), fetchAllAlerts(),
+      const [health, sourceResult, statusResult] = await Promise.all([
+        getJSON("/healthz"), getJSON("/api/v1/sources"), fetchAllStatuses(),
       ]);
       if (health.status !== "ok" || !Array.isArray(sourceResult.items)) throw new Error("El backend respondió con un estado no válido.");
       state.sources = sourceResult.items;
       state.offlineAfter = Math.max(1, Number(sourceResult.offline_after_seconds) || 900);
-      state.alerts = alertResult.items;
-      state.pagingWarning = alertResult.changedDuringPaging;
+      state.inactiveAfter = Math.max(1, Number(sourceResult.inactive_after_seconds) || 86400);
+      state.statuses = statusResult.items;
+      state.alerts = state.statuses.filter((item) => item.state !== "UP");
+      state.pagingWarning = statusResult.changedDuringPaging;
       state.lastSuccess = Date.now();
       state.sourceClocks = new Map(state.sources.map((source) => [source.id, { age: Number(source.age_seconds) || 0, at: state.lastSuccess }]));
       refs.backendBanner.hidden = true;
@@ -150,6 +160,7 @@
       state.refreshing = false;
       if (state.lastSuccess !== null) setText("#footer-update", `Actualizado ${formatDate(new Date(state.lastSuccess).toISOString())}`);
       renderAges();
+      if (state.refreshPending) { state.refreshPending = false; window.setTimeout(refresh, 0); }
     }
   }
 
@@ -164,19 +175,19 @@
       source: $("#filter-source").value, ack: $("#filter-ack").value, downtime: $("#filter-downtime").value,
     };
   }
-  function filteredAlerts() {
+  function filteredStatuses() {
     const filter = readAlertFilters();
-    const broad = (alert) => normalize([alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.type].join(" "));
-    return state.alerts.filter((alert) => {
-      if (filter.host && !normalize(alert.host).includes(filter.host)) return false;
-      if (filter.service && !normalize(alert.service).includes(filter.service)) return false;
-      if (filter.text && !broad(alert).includes(filter.text)) return false;
-      if (filter.state && alert.state !== filter.state) return false;
-      if (filter.server && alert.server !== filter.server) return false;
-      if (filter.backend && alert.backend !== filter.backend) return false;
-      if (filter.source && String(alert.source_id) !== filter.source) return false;
-      if (filter.ack !== "" && String(Boolean(alert.acknowledged)) !== filter.ack) return false;
-      if (filter.downtime !== "" && String(Boolean(alert.downtime)) !== filter.downtime) return false;
+    const broad = (item) => normalize([item.source, item.peer_ip, item.server, item.backend, item.host, item.service, item.state, item.type, item.status_information].join(" "));
+    return state.statuses.filter((item) => {
+      if (filter.host && !normalize(item.host).includes(filter.host)) return false;
+      if (filter.service && !normalize(item.service).includes(filter.service)) return false;
+      if (filter.text && !broad(item).includes(filter.text)) return false;
+      if (filter.state && item.state !== filter.state) return false;
+      if (filter.server && item.server !== filter.server) return false;
+      if (filter.backend && item.backend !== filter.backend) return false;
+      if (filter.source && String(item.source_id) !== filter.source) return false;
+      if (filter.ack !== "" && String(Boolean(item.acknowledged)) !== filter.ack) return false;
+      if (filter.downtime !== "" && String(Boolean(item.downtime)) !== filter.downtime) return false;
       return true;
     });
   }
@@ -191,16 +202,16 @@
     if (comparison === 0) comparison = String(a.host).localeCompare(String(b.host), "es", { numeric: true, sensitivity: "base" });
     return comparison * state.sort.direction;
   }
-  function makeAlertRow(alert) {
+  function makeStatusRow(alert) {
     const tr = make("tr");
     tr.dataset.id = String(alert.id);
-    const cells = Array.from({ length: 10 }, () => make("td"));
+    const cells = Array.from({ length: 11 }, () => make("td"));
     cells.forEach((td) => tr.append(td));
     tr._cells = cells;
     return tr;
   }
   function updateAlertRow(tr, alert) {
-    const signature = JSON.stringify([alert.source_id, alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.stale, alert.acknowledged, alert.downtime, alert.last_seen_at]);
+    const signature = JSON.stringify([alert.source_id, alert.source, alert.peer_ip, alert.server, alert.backend, alert.host, alert.service, alert.state, alert.status_information, alert.stale, alert.acknowledged, alert.downtime, alert.last_seen_at]);
     if (tr.dataset.signature === signature) return;
     tr.dataset.signature = signature;
     const cells = tr._cells;
@@ -213,10 +224,19 @@
     cells[3].append(make("span", "cell-primary", alert.host));
     cells[4].append(make("span", alert.service ? "" : "cell-muted", alert.service || "— (host)"));
     const severity = make("span", "severity-badge", alert.state); severity.dataset.state = alert.state; cells[5].append(severity);
-    const confirmed = make("span", `confirm-badge${alert.stale ? " is-stale" : ""}`, alert.stale ? "Sin confirmar" : "Actual"); cells[6].append(confirmed);
-    const ack = make("span", `flag-badge${alert.acknowledged ? " is-on" : ""}`, alert.acknowledged ? "Sí" : "No"); cells[7].append(ack);
-    const down = make("span", `flag-badge${alert.downtime ? " is-downtime" : ""}`, alert.downtime ? "Sí" : "No"); cells[8].append(down);
-    const received = make("span", "cell-mono", formatDate(alert.last_seen_at)); received.title = alert.last_seen_at || ""; cells[9].append(received);
+    const statusInformation = typeof alert.status_information === "string" ? alert.status_information : "";
+    const informationText = statusInformation.trim() ? statusInformation : "-";
+    const information = make("span", `status-information-text${statusInformation.trim() ? "" : " is-unavailable"}`, informationText);
+    if (statusInformation.trim()) {
+      information.title = statusInformation;
+      information.setAttribute("aria-label", `Status Information completo: ${statusInformation}`);
+      information.tabIndex = 0;
+    }
+    cells[6].className = "status-information-cell"; cells[6].append(information);
+    const confirmed = make("span", `confirm-badge${alert.stale ? " is-stale" : ""}`, alert.stale ? "Sin confirmar" : "Actual"); cells[7].append(confirmed);
+    const ack = make("span", `flag-badge${alert.acknowledged ? " is-on" : ""}`, alert.acknowledged ? "Sí" : "No"); cells[8].append(ack);
+    const down = make("span", `flag-badge${alert.downtime ? " is-downtime" : ""}`, alert.downtime ? "Sí" : "No"); cells[9].append(down);
+    const received = make("span", "cell-mono", formatDate(alert.last_seen_at)); received.title = alert.last_seen_at || ""; cells[10].append(received);
   }
   function moveNodes(container, nodes) {
     nodes.forEach((node, index) => {
@@ -225,44 +245,101 @@
     });
     while (container.children.length > nodes.length) container.lastElementChild.remove();
   }
+  function statusRow(alert, rowIndex) {
+    const key = String(alert.id);
+    let tr = state.statusRows.get(key);
+    if (!tr) { tr = makeStatusRow(alert); state.statusRows.set(key, tr); }
+    updateAlertRow(tr, alert);
+    tr.setAttribute("aria-rowindex", String(rowIndex + 2));
+    return tr;
+  }
+  function clearHiddenStatusRows(items) {
+    const visibleIds = new Set(items.map((alert) => String(alert.id)));
+    for (const key of state.statusRows.keys()) if (!visibleIds.has(key)) state.statusRows.delete(key);
+  }
+  function renderVirtualRows() {
+    const items = state.filteredAlerts;
+    const scroll = $("#monitoring-scroll");
+    if (!items.length) { moveNodes(refs.alertBody, []); state.statusRows.clear(); return; }
+    const headerHeight = scroll.querySelector("thead")?.getBoundingClientRect().height || 40;
+    let sampleRow = refs.alertBody.querySelector("tr:not(.virtual-spacer)");
+    if (!sampleRow) { sampleRow = statusRow(items[0], 0); refs.alertBody.append(sampleRow); }
+    const measuredHeight = sampleRow.getBoundingClientRect().height || 56;
+    const rowHeight = measuredHeight;
+    const overscan = 8;
+    const visibleCapacity = Math.max(30, Math.ceil(Math.max(0, scroll.clientHeight - headerHeight) / rowHeight) + overscan * 2);
+    const requestedStart = Math.floor(Math.max(0, scroll.scrollTop - headerHeight) / rowHeight) - overscan;
+    const start = Math.max(0, Math.min(items.length - visibleCapacity, requestedStart));
+    const end = Math.min(items.length, start + visibleCapacity);
+    if (!state.virtualTop) {
+      state.virtualTop = make("tr", "virtual-spacer");
+      state.virtualTop.setAttribute("aria-hidden", "true");
+      const topCell = make("td"); topCell.colSpan = 11; state.virtualTop.append(topCell);
+    }
+    if (!state.virtualBottom) {
+      state.virtualBottom = make("tr", "virtual-spacer");
+      state.virtualBottom.setAttribute("aria-hidden", "true");
+      const bottomCell = make("td"); bottomCell.colSpan = 11; state.virtualBottom.append(bottomCell);
+    }
+    state.virtualTop.firstElementChild.style.height = `${start * rowHeight}px`;
+    state.virtualBottom.firstElementChild.style.height = `${(items.length - end) * rowHeight}px`;
+    const visible = items.slice(start, end);
+    const rows = visible.map((alert, index) => statusRow(alert, start + index));
+    clearHiddenStatusRows(visible);
+    moveNodes(refs.alertBody, [state.virtualTop, ...rows, state.virtualBottom]);
+  }
   function renderAlerts() {
-    const allFiltered = filteredAlerts().sort(compareAlerts);
-    const totalPages = Math.max(1, Math.ceil(allFiltered.length / state.pageSize));
+    const allFiltered = filteredStatuses().sort(compareAlerts);
+    state.filteredAlerts = allFiltered;
+    const scroll = $("#monitoring-scroll");
+    const showAll = state.pageSize === "all";
+    const totalPages = showAll ? 1 : Math.max(1, Math.ceil(allFiltered.length / state.pageSize));
     state.page = Math.min(state.page, totalPages - 1);
-    const pageItems = allFiltered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
-    const nodes = pageItems.map((alert) => {
-      const key = String(alert.id);
-      let tr = state.alertRows.get(key);
-      if (!tr) { tr = makeAlertRow(alert); state.alertRows.set(key, tr); }
-      updateAlertRow(tr, alert);
-      return tr;
-    });
-    const visibleIds = new Set(pageItems.map((alert) => String(alert.id)));
-    for (const key of state.alertRows.keys()) if (!visibleIds.has(key)) state.alertRows.delete(key);
-    moveNodes(refs.alertBody, nodes);
+    scroll.querySelector(".alerts-table").setAttribute("aria-rowcount", String(allFiltered.length + 1));
+    const virtualized = showAll && allFiltered.length > 250;
+    if (virtualized !== state.virtualized) {
+      state.virtualized = virtualized;
+      scroll.classList.toggle("is-virtualized", virtualized);
+      scroll.scrollTop = 0;
+    }
+    let pageItems;
+    if (virtualized) {
+      pageItems = allFiltered;
+      renderVirtualRows();
+    } else {
+      pageItems = showAll ? allFiltered : allFiltered.slice(state.page * state.pageSize, (state.page + 1) * state.pageSize);
+      const rowOffset = showAll ? 0 : state.page * state.pageSize;
+      const nodes = pageItems.map((alert, index) => statusRow(alert, rowOffset + index));
+      clearHiddenStatusRows(pageItems);
+      moveNodes(refs.alertBody, nodes);
+    }
     const noSources = state.sources.length === 0;
-    const noAlerts = state.alerts.length === 0;
+    const noStatuses = state.statuses.length === 0;
     refs.tableEmpty.hidden = pageItems.length !== 0;
     if (noSources) {
       refs.tableEmptyTitle.textContent = "Todavía no hay snapshots recibidos";
       refs.tableEmptyText.textContent = "El backend está disponible, pero no tiene fuentes registradas. Esperando el primer webhook periódico.";
-    } else if (noAlerts && currentlyHealthy()) {
-      refs.tableEmptyTitle.textContent = "Sin alertas activas";
-      refs.tableEmptyText.textContent = "Todas las fuentes están online y las consultas reportadas son completas. No se recibieron alertas activas en el último snapshot.";
-    } else if (noAlerts) {
-      refs.tableEmptyTitle.textContent = "No hay alertas registradas; estado incompleto";
-      refs.tableEmptyText.textContent = "Hay fuentes offline, datos desactualizados o consultas parciales. La ausencia de alertas no confirma que la infraestructura esté saludable.";
+    } else if (noStatuses && currentlyHealthy()) {
+      refs.tableEmptyTitle.textContent = "Sin estados de hosts o servicios";
+      refs.tableEmptyText.textContent = "Las consultas están completas y no hay alertas. No se recibieron objetos UP para listar en este snapshot.";
+    } else if (noStatuses) {
+      refs.tableEmptyTitle.textContent = "Sin estados de monitoreo confirmados";
+      refs.tableEmptyText.textContent = "Hay fuentes offline, datos desactualizados o consultas parciales. La ausencia de datos no confirma que la infraestructura esté saludable.";
     } else {
       refs.tableEmptyTitle.textContent = "No hay resultados con esos filtros";
       refs.tableEmptyText.textContent = "Prueba cambiar los criterios o limpiar los filtros.";
     }
-    const start = allFiltered.length ? state.page * state.pageSize + 1 : 0;
-    const end = Math.min((state.page + 1) * state.pageSize, allFiltered.length);
-    setText("#filtered-count", allFiltered.length === state.alerts.length ? `Mostrando ${start}–${end} de ${allFiltered.length} alertas` : `${allFiltered.length} de ${state.alerts.length} alertas coinciden`);
-    setText("#alert-count-label", `${state.alerts.length} ${state.alerts.length === 1 ? "alerta" : "alertas"}`);
-    setText("#tab-alert-count", state.alerts.length);
-    const pagination = $("#pagination"); pagination.hidden = allFiltered.length <= state.pageSize;
-    setText("#page-summary", `Página ${state.page + 1} de ${totalPages}`);
+    const start = allFiltered.length ? (showAll ? 1 : state.page * state.pageSize + 1) : 0;
+    const end = showAll ? allFiltered.length : Math.min((state.page + 1) * state.pageSize, allFiltered.length);
+    if (allFiltered.length === state.statuses.length) {
+      setText("#filtered-count", showAll ? `Mostrando todos los ${allFiltered.length} hosts y servicios` : `Mostrando ${start}–${end} de ${allFiltered.length} hosts y servicios`);
+    } else {
+      setText("#filtered-count", showAll ? `${allFiltered.length} de ${state.statuses.length} estados coinciden · todos visibles` : `${allFiltered.length} de ${state.statuses.length} estados coinciden`);
+    }
+    setText("#alert-count-label", `${state.statuses.length} ${state.statuses.length === 1 ? "elemento" : "elementos"}`);
+    setText("#tab-alert-count", state.statuses.length);
+    const pagination = $("#pagination"); pagination.hidden = showAll || allFiltered.length <= state.pageSize;
+    setText("#page-summary", showAll ? `Todos · ${allFiltered.length} registros` : `Página ${state.page + 1} de ${totalPages} · ${start}–${end} de ${allFiltered.length}`);
     $("#page-prev").disabled = state.page <= 0; $("#page-next").disabled = state.page >= totalPages - 1;
     for (const button of $$("[data-sort]")) {
       const selected = button.dataset.sort === state.sort.key;
@@ -302,12 +379,12 @@
   function renderWarning() {
     const issues = [];
     const offline = state.sources.filter(sourceIsOffline).length;
-    const staleAlerts = state.alerts.filter((alert) => alert.stale).length;
+    const staleItems = state.statuses.filter((item) => item.stale).length;
     const failedServers = state.sources.flatMap((source) => (source.servers || []).filter((server) => server.status !== "ok" || server.stale || server.removed).map((server) => ({ source, server })));
     const partial = state.sources.filter((source) => !source.complete).length;
     if (offline) issues.push(`${offline} ${offline === 1 ? "fuente offline" : "fuentes offline"}`);
     if (failedServers.length) issues.push(`${failedServers.length} ${failedServers.length === 1 ? "servidor con error, pendiente o retirado" : "servidores con error, pendientes o retirados"}`);
-    if (staleAlerts) issues.push(`${staleAlerts} ${staleAlerts === 1 ? "alerta sin confirmar" : "alertas sin confirmar"}`);
+    if (staleItems) issues.push(`${staleItems} ${staleItems === 1 ? "estado sin confirmar" : "estados sin confirmar"}`);
     else if (partial && !failedServers.length) issues.push(`${partial} ${partial === 1 ? "snapshot parcial" : "snapshots parciales"}`);
     if (state.pagingWarning) issues.push("la lista cambió mientras se recorrían sus páginas; se volverá a consultar en el próximo ciclo");
     refs.warning.hidden = issues.length === 0;
@@ -319,7 +396,8 @@
     const info = make("div");
     const name = make("h3", "source-name", source.source); info.append(name);
     const ident = make("small", "source-ident", `ID ${source.id} · ${source.peer_ip || "peer desconocido"}`); info.append(ident);
-    const badge = make("span", "source-status"); top.append(info, badge); card.append(top);
+    const badges = make("div", "source-badges");
+    const badge = make("span", "source-status"); const activity = make("span", "source-activity"); badges.append(badge, activity); top.append(info, badges); card.append(top);
     const meta = make("div", "source-meta-grid");
     const lastMeta = make("div", "source-meta"); lastMeta.append(make("span", "", "Último webhook")); const last = make("strong", "source-last", formatDate(source.last_received_at)); lastMeta.append(last);
     const ageMeta = make("div", "source-meta"); ageMeta.append(make("span", "", "Tiempo transcurrido")); const age = make("strong", "age-value", "—"); ageMeta.append(age);
@@ -328,10 +406,14 @@
     meta.append(lastMeta, ageMeta, alertMeta, snapMeta); card.append(meta);
     const serverBlock = make("div", "source-servers"); serverBlock.append(make("div", "source-servers-title", "Servidores Thruk"));
     const serverList = make("div", "source-server-list"); serverBlock.append(serverList); card.append(serverBlock);
-    card._refs = { badge, last, age, alerts, complete, serverList };
+    const actions = make("div", "source-actions");
+    const remove = make("button", "danger-action", "Eliminar fuente inactiva"); remove.type = "button"; remove.hidden = true;
+    remove.addEventListener("click", () => openSourceDelete(card._source)); actions.append(remove); card.append(actions);
+    card._refs = { badge, activity, last, age, alerts, complete, serverList, remove };
     return card;
   }
   function updateSourceCard(card, source) {
+    card._source = source;
     const servers = Array.isArray(source.servers) ? source.servers : [];
     const signature = JSON.stringify([source.source, source.peer_ip, source.last_received_at, source.complete, servers.map((server) => [server.name, server.status, server.stale, server.removed])]);
     if (card.dataset.signature !== signature) {
@@ -352,6 +434,11 @@
     const offline = sourceIsOffline(source);
     card._refs.badge.textContent = offline ? "Offline" : "Online";
     card._refs.badge.classList.toggle("is-offline", offline);
+    const inactive = sourceIsInactive(source);
+    card._refs.activity.textContent = inactive ? "Inactiva" : "Activa";
+    card._refs.activity.classList.toggle("is-inactive", inactive);
+    card._refs.activity.title = `Umbral de inactividad: ${durationLabel(state.inactiveAfter)}`;
+    card._refs.remove.hidden = !inactive;
     card._refs.age.textContent = ageText(sourceAge(source));
     card._refs.age.title = `${Math.floor(sourceAge(source))} s desde la última recepción; offline tras ${state.offlineAfter} s`;
     card._refs.alerts.textContent = String(state.alerts.filter((alert) => Number(alert.source_id) === Number(source.id)).length);
@@ -438,8 +525,44 @@
       card._refs.age.title = `${Math.floor(age)} s desde la última recepción; offline tras ${state.offlineAfter} s`;
       card._refs.badge.textContent = offline ? "Offline" : "Online";
       card._refs.badge.classList.toggle("is-offline", offline);
+      const inactive = sourceIsInactive(source);
+      card._refs.activity.textContent = inactive ? "Inactiva" : "Activa";
+      card._refs.activity.classList.toggle("is-inactive", inactive);
+      card._refs.activity.title = `Umbral de inactividad: ${durationLabel(state.inactiveAfter)}`;
+      card._refs.remove.hidden = !inactive;
     }
     if (state.sources.length && state.lastSuccess !== null) { renderMetrics(); renderWarning(); }
+  }
+
+  function openSourceDelete(source) {
+    if (!source || !sourceIsInactive(source)) return;
+    const dialog = $("#source-delete-dialog");
+    dialog.dataset.sourceId = String(source.id);
+    $("#source-delete-message").textContent = `¿Eliminar “${source.source}” (${source.peer_ip || "peer desconocido"})? Última información recibida ${formatDate(source.last_received_at)} (${ageText(sourceAge(source))}).`;
+    $("#source-delete-error").hidden = true;
+    $("#source-delete-error").textContent = "";
+    $("#source-delete-accept").disabled = false;
+    dialog.showModal();
+    $("#source-delete-cancel").focus();
+  }
+
+  async function deleteSelectedSource() {
+    const dialog = $("#source-delete-dialog");
+    const sourceId = Number(dialog.dataset.sourceId);
+    if (!Number.isInteger(sourceId) || sourceId < 1) return;
+    const button = $("#source-delete-accept"); const error = $("#source-delete-error");
+    button.disabled = true; error.hidden = true;
+    try {
+      const response = await fetch(`/api/v1/sources/${sourceId}`, { method: "DELETE", headers: { Accept: "application/json" }, cache: "no-store" });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+      dialog.close();
+      state.sourceCards.delete(String(sourceId));
+      await refresh();
+    } catch (cause) {
+      error.textContent = cause instanceof Error ? cause.message : "No se pudo eliminar la fuente.";
+      error.hidden = false;
+    } finally { button.disabled = false; }
   }
 
   function chooseView(view) {
@@ -455,20 +578,39 @@
   function scheduleRefresh() { if (state.timer) window.clearTimeout(state.timer); state.timer = window.setTimeout(async () => { await refresh(); restartPolling(); }, 0); }
 
   $("#filters").addEventListener("submit", (event) => event.preventDefault());
-  $("#filters").addEventListener("input", (event) => { if (event.target.matches("input")) { state.page = 0; renderAlerts(); } });
-  $("#filters").addEventListener("change", (event) => { if (event.target.matches("select")) { state.page = 0; renderAlerts(); } });
+  function resetMonitoringPosition() { if (state.virtualized) $("#monitoring-scroll").scrollTop = 0; }
+  $("#filters").addEventListener("input", (event) => { if (event.target.matches("input")) { state.page = 0; resetMonitoringPosition(); renderAlerts(); } });
+  $("#filters").addEventListener("change", (event) => { if (event.target.matches("select")) { state.page = 0; resetMonitoringPosition(); renderAlerts(); } });
   $("#clear-filters").addEventListener("click", () => {
     for (const selector of ["#filter-host", "#filter-service", "#filter-text", "#filter-severity", "#filter-server", "#filter-backend", "#filter-source", "#filter-ack", "#filter-downtime"]) $(selector).value = "";
-    state.page = 0; renderAlerts(); $("#filter-host").focus();
+    state.page = 0; resetMonitoringPosition(); renderAlerts(); $("#filter-host").focus();
   });
   for (const button of $$("[data-sort]")) button.addEventListener("click", () => {
     const key = button.dataset.sort;
     if (state.sort.key === key) state.sort.direction *= -1;
     else { state.sort.key = key; state.sort.direction = 1; }
+    resetMonitoringPosition();
     renderAlerts();
   });
   $("#page-prev").addEventListener("click", () => { state.page = Math.max(0, state.page - 1); renderAlerts(); });
   $("#page-next").addEventListener("click", () => { state.page += 1; renderAlerts(); });
+  $("#page-size").addEventListener("change", (event) => {
+    const selected = event.target.value;
+    const newSize = selected === "all" ? "all" : Number(selected);
+    if (![25, 50, 100, 250, "all"].includes(newSize)) return;
+    if (state.pageSize === "all" || newSize === "all") { state.page = 0; $("#monitoring-scroll").scrollTop = 0; }
+    state.pageSize = newSize;
+    storageSet("naftamon-monitor-page-size", String(newSize));
+    renderAlerts();
+  });
+  let virtualRenderPending = false;
+  function scheduleVirtualRender() {
+    if (!state.virtualized || virtualRenderPending) return;
+    virtualRenderPending = true;
+    window.requestAnimationFrame(() => { virtualRenderPending = false; if (state.virtualized) renderVirtualRows(); });
+  }
+  $("#monitoring-scroll").addEventListener("scroll", scheduleVirtualRender, { passive: true });
+  window.addEventListener("resize", scheduleVirtualRender, { passive: true });
   $("#history-prev").addEventListener("click", () => { state.historyPage = Math.max(0, state.historyPage - 1); fetchHistory().catch(showHistoryError); });
   $("#history-next").addEventListener("click", () => { state.historyPage += 1; fetchHistory().catch(showHistoryError); });
   $("#history-source").addEventListener("change", () => { state.historyPage = 0; fetchHistory().catch(showHistoryError); });
@@ -484,10 +626,18 @@
   $("#refresh-now").addEventListener("click", scheduleRefresh);
   $("#retry-now").addEventListener("click", scheduleRefresh);
   $("#theme-toggle").addEventListener("click", () => updateTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+  $("#source-delete-accept").addEventListener("click", deleteSelectedSource);
+  $("#source-delete-cancel").addEventListener("click", () => $("#source-delete-dialog").close());
+  $("#source-delete-close").addEventListener("click", () => $("#source-delete-dialog").close());
 
   const savedTheme = storageGet("naftamon-theme"); updateTheme(savedTheme === "light" ? "light" : "dark");
   const savedInterval = Number(storageGet("naftamon-poll-ms"));
   if ([5000, 10000, 15000, 30000, 60000].includes(savedInterval)) { state.pollMs = savedInterval; $("#poll-interval").value = String(savedInterval); }
+  const savedPageSize = storageGet("naftamon-monitor-page-size");
+  if (["25", "50", "100", "250", "all"].includes(savedPageSize)) {
+    state.pageSize = savedPageSize === "all" ? "all" : Number(savedPageSize);
+    $("#page-size").value = savedPageSize;
+  }
   window.setInterval(renderAges, 1000);
   refresh().finally(restartPolling);
 })();

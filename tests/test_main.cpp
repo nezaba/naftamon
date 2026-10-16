@@ -108,7 +108,8 @@ static void coreTests() {
         "max_check_attempts":3,"active_checks_enabled":0,"is_flapping":1,"notifications_enabled":1,
         "acknowledged":0,"state_type":0,"scheduled_downtime_depth":1}])", false, "s", true, &out));
     CHECK(out.size() == 1 && out[0].state == CRITICAL && out[0].service == "D" && out[0].realService == "d");
-    CHECK(out[0].passive && out[0].flapping && out[0].downtime && !out[0].hard && out[0].output == "a b");
+    CHECK(out[0].passive && out[0].flapping && out[0].downtime && !out[0].hard &&
+          out[0].output == "a\nb" && out[0].displayOutput() == "a b");
     CHECK(!parseStatusJson("<html>", true, "s", false, &out));
 
     // multi-column sort: host ascending, then service descending within the same host
@@ -185,6 +186,7 @@ static QJsonDocument sinkGet(const QString &base, const QString &path) {
 }
 static QJsonArray receivedWebhooks(const QString &base) { return sinkGet(base, "/received").array(); }
 static QJsonObject sinkStats(const QString &base) { return sinkGet(base, "/stats").object(); }
+static QJsonObject mockStats(const QString &url);
 
 static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     QUrl receivedUrl(sinkUrl);
@@ -193,19 +195,26 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     const QString base = receivedUrl.toString();
     ServerConf conf{"gateway-test", thrukUrl, "admin", "secret", {}};
     ThrukServer thruk(conf);
+    const int fullQueriesBefore = mockStats(thrukUrl).value("full").toInt();
     thruk.refresh();
     CHECK(waitFor(thruk, [&] { return thruk.hasData || !thruk.error.isEmpty(); }, 5000));
     CHECK(thruk.error.isEmpty());
     CHECK(thruk.raw.hosts.size() == 1 && thruk.raw.services.size() == 3);
+    CHECK(thruk.raw.okStatuses.size() == 2);
+    CHECK(mockStats(thrukUrl).value("full").toInt() - fullQueriesBefore == 2);
+    const QString specialInfo = QString::fromUtf8("  café — <disk> &\npath=\"/var/lib\" ✓  ");
+    const QString hostInfo = QString::fromUtf8("PING CRITICAL — café & <host> ✓");
     if (!thruk.raw.services.isEmpty()) {
-        thruk.raw.services[0].output = "secret token admin";
+        thruk.raw.services[0].output = specialInfo;
         thruk.raw.services[0].downtime = true;
+        thruk.raw.services[1].output = QString();
     }
+    if (!thruk.raw.hosts.isEmpty()) thruk.raw.hosts[0].output = hostInfo;
     ThrukServer empty(ServerConf{"empty", thrukUrl, "admin", "secret", {}});
     empty.hasData = true;
     ThrukServer broken(ServerConf{"broken", thrukUrl, "admin", "secret", {}});
     broken.hasData = true;  // a previous successful poll must not be treated as current
-    broken.raw.services = thruk.raw.services;
+    broken.raw = thruk.raw;
     broken.error = "connection failed";
     ThrukServer pending(ServerConf{"pending", thrukUrl, "admin", "secret", {}});
 
@@ -232,14 +241,43 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(QDateTime::fromString(payload.value("timestamp").toString(), Qt::ISODateWithMs).isValid());
     CHECK(payload.value("servers").toArray().size() == 2);
     CHECK(payload.value("alerts").toArray().size() == 4);
-    bool acknowledged = false, downtime = false;
+    CHECK(payload.value("ok_statuses").toArray().size() == 2);
+    bool acknowledged = false, downtime = false, foundHostInfo = false, foundEmptyServiceInfo = false,
+         foundSpecialInfo = false;
     for (const auto &v : payload.value("alerts").toArray()) {
         QJsonObject a = v.toObject();
         CHECK(a.value("server") == "gateway-test" && !a.value("state").toString().isEmpty());
+        CHECK(a.value("state") != "UP");
+        CHECK(a.value("status_information").isString());
         CHECK(QDateTime::fromString(a.value("last_check").toString(), Qt::ISODate).isValid());
         acknowledged |= a.value("acknowledged").toBool();
         downtime |= a.value("downtime").toBool();
+        if (a.value("type") == "host") {
+            foundHostInfo = true;
+            CHECK(a.value("status_information").toString() == hostInfo);
+        }
+        if (a.value("host") == "db01" && a.value("service") == "load") {
+            foundEmptyServiceInfo = true;
+            CHECK(a.value("status_information").toString().isEmpty());
+        }
+        if (a.value("host") == "db01" && a.value("service") == "disk") {
+            foundSpecialInfo = true;
+            CHECK(a.value("status_information").toString() == specialInfo);
+        }
     }
+    CHECK(foundHostInfo && foundEmptyServiceInfo && foundSpecialInfo);
+    bool foundOkHost = false, foundOkService = false;
+    for (const auto &v : payload.value("ok_statuses").toArray()) {
+        const QJsonObject item = v.toObject();
+        CHECK(item.value("state") == "UP" && item.value("status_information").isString());
+        CHECK(item.value("server") == "gateway-test" && item.value("backend") == "alpha");
+        foundOkHost |= item.value("type") == "host" && item.value("host") == "maint01" &&
+                       item.value("status_information") == "PING OK";
+        foundOkService |= item.value("type") == "service" && item.value("host") == "web01" &&
+                          item.value("service") == "ssh" &&
+                          item.value("status_information").toString() == "OK – café & <ready> ✓";
+    }
+    CHECK(foundOkHost && foundOkService);
     CHECK(acknowledged && downtime);  // visual acknowledgement/downtime filters do not apply
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
     CHECK(!body.contains("secret") && !body.contains("admin") && !body.contains("thrukUrl") &&
@@ -262,6 +300,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(waitUntil([&] { return delivered >= slowIntervalStart + 3; }, 1000));
     payload = receivedWebhooks(base).last().toObject();
     CHECK(payload.value("complete") == false && payload.value("alerts").toArray().isEmpty());
+    CHECK(payload.value("ok_statuses").toArray().isEmpty());
     CHECK(payload.value("servers").toArray().last().toObject().value("status") == "error");
 
     const int beforePartial = delivered;
@@ -269,6 +308,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(waitUntil([&] { return delivered > beforePartial; }, 1000));
     payload = receivedWebhooks(base).last().toObject();
     CHECK(payload.value("complete") == false && payload.value("alerts").toArray().size() == 4);
+    CHECK(payload.value("ok_statuses").toArray().size() == 2);
     CHECK(payload.value("servers").toArray().last().toObject().value("status") == "pending");
 
     ThrukServer second(ServerConf{"gateway-second", thrukUrl, "admin", "secret", {}});
@@ -276,6 +316,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     second.raw = thruk.raw;
     for (Item &item : second.raw.hosts) item.server = second.conf.name;
     for (Item &item : second.raw.services) item.server = second.conf.name;
+    for (Item &item : second.raw.okStatuses) item.server = second.conf.name;
     const int beforeMulti = delivered;
     gateway.setServers({&thruk, &second});
     CHECK(waitUntil([&] { return delivered > beforeMulti; }, 1000));
@@ -287,14 +328,43 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
         alertServers.insert(value.toObject().value("server").toString());
     CHECK(alertServers == QSet<QString>({"gateway-test", "gateway-second"}));
 
+    // A strict legacy receiver rejects the additions once, then keeps receiving
+    // the original payload shape without generating or losing alert snapshots.
+    const QString legacyUrl = base + "/legacy";
+    WebhookGateway compatibility(nullptr, 1000);
+    compatibility.setServers({&thruk});
+    int compatibilityDelivered = 0;
+    QObject::connect(&compatibility, &WebhookGateway::delivered, &compatibility,
+                     [&](int) { ++compatibilityDelivered; });
+    const int legacyRequestsBefore = sinkStats(base).value("total").toInt();
+    const int rejectedBefore = sinkStats(base).value("extended_rejected").toInt();
+    compatibility.configure(true, legacyUrl, 60);
+    CHECK(waitUntil([&] { return compatibilityDelivered == 1; }, 1500));
+    CHECK(sinkStats(base).value("total").toInt() == legacyRequestsBefore + 2);
+    CHECK(sinkStats(base).value("extended_rejected").toInt() == rejectedBefore + 1);
+    payload = receivedWebhooks(base).last().toObject();
+    CHECK(!payload.contains("ok_statuses"));
+    for (const auto &v : payload.value("alerts").toArray())
+        CHECK(!v.toObject().contains("status_information"));
+    const int legacyRequestsAfterFallback = sinkStats(base).value("total").toInt();
+    compatibility.sendNow();
+    CHECK(waitUntil([&] { return compatibilityDelivered == 2; }, 1000));
+    CHECK(sinkStats(base).value("total").toInt() == legacyRequestsAfterFallback + 1);
+    compatibility.configure(false, legacyUrl, 60);
+
     gateway.configure(true, sinkUrl + "?status=500", 1);
     CHECK(waitUntil([&] { return failed >= 1; }, 1500));
     CHECK(lastStatus == 500);
-    gateway.configure(true, "http://127.0.0.1:1/webhook", 1);
+    const int generic422Before = sinkStats(base).value("total").toInt();
+    gateway.configure(true, sinkUrl + "?status=422", 1);
     CHECK(waitUntil([&] { return failed >= 2; }, 1500));
+    CHECK(lastStatus == 422);
+    CHECK(sinkStats(base).value("total").toInt() == generic422Before + 1);
+    gateway.configure(true, "http://127.0.0.1:1/webhook", 1);
+    CHECK(waitUntil([&] { return failed >= 3; }, 1500));
     CHECK(lastStatus == 0);
     gateway.configure(true, sinkUrl + "?delay=2&status=500", 1);
-    CHECK(waitUntil([&] { return failed >= 3; }, 1500));
+    CHECK(waitUntil([&] { return failed >= 4; }, 1500));
     CHECK(lastStatus == 0);  // absolute 250 ms timeout
     gateway.configure(false, sinkUrl, 1);
     const int stoppedAt = sinkStats(base).value("total").toInt();
@@ -344,6 +414,10 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
         Item item = svc("bulk-host-" + QString::number(n) + QString(100, 'x'), "disk", CRITICAL);
         item.server = "bulk";
         bulk.raw.services.append(item);
+        Item healthy = svc("healthy-host-" + QString::number(n) + QString(100, 'y'), "ping", UP);
+        healthy.server = "bulk";
+        healthy.output = QString(100, 'z');
+        bulk.raw.okStatuses.append(healthy);
     }
     WebhookGateway large(nullptr, 5000);
     large.setServers({&bulk});
@@ -352,8 +426,11 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     large.configure(true, sinkUrl + "?quiet=1", 60);
     CHECK(waitUntil([&] { return largeDelivered == 1; }, 5000));
     large.configure(false, sinkUrl, 60);
-    CHECK(sinkStats(base).value("last_body_bytes").toInt() > 1024 * 1024);
-    CHECK(receivedWebhooks(base).last().toObject().value("alerts").toArray().size() == 7000);
+    const int largeBytes = sinkStats(base).value("last_body_bytes").toInt();
+    CHECK(largeBytes > 1024 * 1024 && largeBytes < 8 * 1024 * 1024);
+    const QJsonObject largePayload = receivedWebhooks(base).last().toObject();
+    CHECK(largePayload.value("alerts").toArray().size() == 7000);
+    CHECK(largePayload.value("ok_statuses").toArray().size() == 7000);
 
     WebhookGateway slow(nullptr, 4000);
     slow.setServers({&empty});

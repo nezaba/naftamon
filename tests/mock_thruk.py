@@ -43,6 +43,7 @@ services = {
     ('db01', 'disk'): svc('db01', 'disk', 2),
     ('db01', 'load'): svc('db01', 'load', 1, state_type=0, current_attempt=1),
     ('app01', 'http'): svc('app01', 'http', 3, acknowledged=1, peer_key='b2', peer_name='beta'),
+    ('web01', 'ssh'): svc('web01', 'ssh', 0, plugin_output='OK – café & <ready> ✓'),
 }
 
 # --big N: add N problem services on N/10 hosts (performance tests)
@@ -111,10 +112,11 @@ class H(BaseHTTPRequestHandler):
                     if q.get('hostprops') == ['16']:  # hosts with active checks disabled
                         data = [h for h in hosts.values() if h['active_checks_enabled'] == 0]
                     elif q.get('style') == ['hostdetail']:
-                        assert q.get('hoststatustypes') == ['12']
-                        data = [h for h in hosts.values() if h['state'] != 0]
+                        assert q.get('hoststatustypes') == ['14']
+                        data = [h for h in hosts.values() if h['state'] in (0, 1, 2)]
                     else:
-                        data = [s for s in services.values() if s['state'] != 0]
+                        assert q.get('servicestatustypes') == ['30']
+                        data = [s for s in services.values() if s['state'] in (0, 1, 2, 3)]
                 # thruk_backends cookie: "key=2&key2=2" hides those backends
                 m = re.search(r'thruk_backends="?([^;"]*)', self.headers.get('Cookie') or '')
                 off = [p.split('=')[0] for p in m.group(1).split('&')] if m else []

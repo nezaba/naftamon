@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -107,6 +107,7 @@ def _alert_dict(row, stale: bool) -> dict[str, Any]:
         "downtime": _bool(row["downtime"]),
         "last_check": row["last_check"],
         "last_change": row["last_change"],
+        "status_information": row["status_information"],
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
         "stale": stale,
@@ -117,13 +118,18 @@ def create_app(
     settings: Settings | None = None,
     database_path: Path | None = None,
     offline_after_seconds: int | None = None,
+    source_inactive_after_seconds: int | None = None,
     history_retention_days: int | None = None,
 ) -> FastAPI:
     base = settings or Settings.from_environment()
     app_settings = Settings(
         database_path=database_path or base.database_path,
         max_request_bytes=base.max_request_bytes,
-        offline_after_seconds=offline_after_seconds or base.offline_after_seconds,
+        offline_after_seconds=offline_after_seconds if offline_after_seconds is not None else base.offline_after_seconds,
+        source_inactive_after_seconds=(
+            source_inactive_after_seconds if source_inactive_after_seconds is not None
+            else base.source_inactive_after_seconds
+        ),
         history_retention_days=history_retention_days if history_retention_days is not None else base.history_retention_days,
     )
     initialize(app_settings.database_path)
@@ -134,9 +140,20 @@ def create_app(
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+    @app.middleware("http")
+    async def revalidate_dashboard_assets(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     @app.get("/")
     def root():
         return FileResponse(static_dir / "index.html", media_type="text/html")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return FileResponse(static_dir / "favicon.svg", media_type="image/svg+xml")
 
     @app.post(INGEST_PATH, status_code=202)
     async def ingest(request: Request):
@@ -183,8 +200,11 @@ def create_app(
     def list_sources():
         now = datetime.now(timezone.utc)
         threshold = app_settings.offline_after_seconds
+        inactive_threshold = app_settings.source_inactive_after_seconds
         with connect(app_settings.database_path) as db:
-            sources = db.execute("SELECT * FROM sources ORDER BY source_name, peer_ip").fetchall()
+            sources = db.execute(
+                "SELECT * FROM sources WHERE deleted_at IS NULL ORDER BY source_name, peer_ip"
+            ).fetchall()
             result = []
             for source in sources:
                 age = max(0, (now - datetime.fromisoformat(source["last_received_at"].replace("Z", "+00:00"))).total_seconds())
@@ -198,6 +218,7 @@ def create_app(
                         "first_received_at": source["first_received_at"], "last_received_at": source["last_received_at"],
                         "payload_timestamp": source["payload_timestamp"], "complete": _bool(source["complete"]),
                         "age_seconds": int(age), "offline": age > threshold,
+                        "inactive": age > inactive_threshold,
                         "servers": [
                             {"name": server["name"], "status": server["status"],
                              "status_received_at": server["status_received_at"], "last_ok_at": server["last_ok_at"],
@@ -207,7 +228,57 @@ def create_app(
                         ],
                     }
                 )
-        return {"offline_after_seconds": threshold, "items": result}
+        return {
+            "offline_after_seconds": threshold,
+            "inactive_after_seconds": inactive_threshold,
+            "items": result,
+        }
+
+    @app.delete("/api/v1/sources/{source_id}")
+    def delete_inactive_source(source_id: int):
+        if source_id < 1:
+            raise HTTPException(status_code=404, detail="Source not found")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        try:
+            with connect(app_settings.database_path) as db:
+                db.execute("BEGIN IMMEDIATE")
+                source = db.execute(
+                    "SELECT id, last_received_at FROM sources WHERE id = ? AND deleted_at IS NULL",
+                    (source_id,),
+                ).fetchone()
+                if source is None:
+                    raise HTTPException(status_code=404, detail="Source not found")
+                last_received = datetime.fromisoformat(source["last_received_at"].replace("Z", "+00:00"))
+                if (now - last_received).total_seconds() <= app_settings.source_inactive_after_seconds:
+                    raise HTTPException(status_code=409, detail="Only inactive sources can be removed")
+
+                # Keep event/delivery/attempt rows as notification history. Stop work
+                # that has not completed so removal cannot trigger later sends.
+                db.execute(
+                    """UPDATE notification_deliveries
+                       SET status = 'cancelled', lease_until = NULL, updated_at = ?,
+                           last_error = 'Source manually removed'
+                       WHERE status IN ('pending', 'in_flight')
+                         AND event_id IN (SELECT id FROM notification_events WHERE source_id = ?)""",
+                    (now_text, source_id),
+                )
+                db.execute("DELETE FROM notification_suppression_state WHERE source_id = ?", (source_id,))
+                for table in (
+                    "latest_snapshots", "active_alerts", "monitored_statuses",
+                    "monitored_servers", "alert_history",
+                ):
+                    db.execute(f"DELETE FROM {table} WHERE source_id = ?", (source_id,))
+                # A hidden tombstone preserves notification_events.source_id and
+                # the unique emitter key, without keeping its old receipt metadata.
+                db.execute(
+                    """UPDATE sources SET deleted_at = ?, first_received_at = ?, last_received_at = ?,
+                       payload_timestamp = ?, complete = 0, snapshot_revision = 0 WHERE id = ?""",
+                    (now_text, now_text, now_text, now_text, source_id),
+                )
+        except sqlite3.Error:
+            return JSONResponse({"detail": "Source could not be removed"}, status_code=503)
+        return {"deleted": True, "source_id": source_id, "reconnectable": True}
 
     @app.get("/api/v1/alerts")
     def list_alerts(
@@ -250,10 +321,73 @@ def create_app(
         return {"total": total, "limit": limit, "offset": offset,
                 "items": [_alert_dict(row, _bool(row["stale_flag"])) for row in rows]}
 
+    @app.get("/api/v1/statuses")
+    def list_statuses(
+        source_id: int | None = None,
+        server: str | None = Query(default=None, max_length=255),
+        backend: str | None = Query(default=None, max_length=255),
+        host: str | None = Query(default=None, max_length=255),
+        service: str | None = Query(default=None, max_length=255),
+        state: str | None = Query(default=None, max_length=32),
+        status_type: str | None = Query(default=None, alias="type", pattern="^(host|service)$"),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ):
+        """Return all current monitoring states, including healthy UP/OK objects."""
+        union_query = f"""SELECT * FROM (
+            SELECT 'alert:' || a.id AS id, a.source_id, s.source_name AS source, s.peer_ip,
+                   a.server, a.backend, a.host, a.service, a.type, a.state,
+                   a.status_information, a.hard, a.acknowledged, a.downtime,
+                   a.last_check, a.last_change, a.first_seen_at, a.last_seen_at,
+                   {_stale_clause()} AS stale_flag
+              FROM active_alerts a JOIN sources s ON s.id = a.source_id
+              JOIN monitored_servers ms ON ms.source_id = a.source_id AND ms.name = a.server
+            UNION ALL
+            SELECT 'status:' || m.id AS id, m.source_id, s.source_name AS source, s.peer_ip,
+                   m.server, m.backend, m.host, m.service, m.type, m.state,
+                   m.status_information, m.hard, m.acknowledged, m.downtime,
+                   m.last_check, m.last_change, m.first_seen_at, m.last_seen_at,
+                   CASE WHEN ((julianday('now') - julianday(s.last_received_at)) * 86400 > ?
+                     OR ms.status != 'ok' OR ms.status_revision < s.snapshot_revision OR ms.removed = 1
+                     OR julianday(m.snapshot_timestamp) < julianday(s.payload_timestamp)) THEN 1 ELSE 0 END AS stale_flag
+              FROM monitored_statuses m JOIN sources s ON s.id = m.source_id
+              JOIN monitored_servers ms ON ms.source_id = m.source_id AND ms.name = m.server
+        )"""
+        conditions = []
+        params: list[Any] = [app_settings.offline_after_seconds, app_settings.offline_after_seconds]
+        for column, value in (("source_id", source_id), ("server", server), ("backend", backend),
+                              ("host", host), ("service", service), ("type", status_type)):
+            if value is not None:
+                conditions.append(f"{column} = ?")
+                params.append(value)
+        if state is not None:
+            conditions.append("state = ?")
+            params.append(state.upper())
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        with connect(app_settings.database_path) as db:
+            total = db.execute("SELECT COUNT(*) FROM (" + union_query + ") AS current_statuses" + where, params).fetchone()[0]
+            rows = db.execute(
+                "SELECT * FROM (" + union_query + ") AS current_statuses" + where +
+                " ORDER BY state, server, host, service LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["hard"] = _bool(item["hard"])
+            item["acknowledged"] = _bool(item["acknowledged"])
+            item["downtime"] = _bool(item["downtime"])
+            item["stale"] = _bool(item["stale_flag"])
+            del item["stale_flag"]
+            items.append(item)
+        return {"total": total, "limit": limit, "offset": offset, "items": items}
+
     @app.get("/api/v1/stats")
     def stats():
         with connect(app_settings.database_path) as db:
-            source_rows = db.execute("SELECT last_received_at FROM sources").fetchall()
+            source_rows = db.execute(
+                "SELECT last_received_at FROM sources WHERE deleted_at IS NULL"
+            ).fetchall()
             now = datetime.now(timezone.utc)
             online_sources = 0
             for row in source_rows:
@@ -312,7 +446,7 @@ def create_app(
                 }
                 required_tables = {
                     "schema_version", "sources", "latest_snapshots", "monitored_servers",
-                    "active_alerts", "alert_history",
+                    "active_alerts", "monitored_statuses", "alert_history",
                 }
                 if version != SCHEMA_VERSION or not required_tables.issubset(tables):
                     return JSONResponse({"status": "unhealthy", "database": "unavailable"}, status_code=503)

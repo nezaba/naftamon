@@ -28,7 +28,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = urlparse(self.path)
-        if route.path != "/webhook":
+        if route.path not in ("/webhook", "/legacy"):
             return self.reply(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -51,6 +51,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if delay:
                 time.sleep(delay)
+            rejected_fields = []
+            if "ok_statuses" in payload:
+                rejected_fields.append("ok_statuses")
+            if any("status_information" in item for item in payload.get("alerts", [])):
+                rejected_fields.append("status_information")
+            if route.path == "/legacy" and rejected_fields:
+                with received_lock:
+                    stats["extended_rejected"] = stats.get("extended_rejected", 0) + 1
+                return self.reply(422, {"detail": [
+                    {"type": "extra_forbidden", "loc": ["body", field],
+                     "msg": "Extra inputs are not permitted"}
+                    for field in rejected_fields
+                ]})
             if status != 202:
                 return self.reply(status, {"received": False})
             with received_lock:

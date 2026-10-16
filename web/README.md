@@ -18,11 +18,11 @@ La página principal en `http://127.0.0.1:8080/` abre directamente el dashboard,
 
 La vista principal muestra el total de alertas, CRITICAL, WARNING, UNKNOWN y hosts DOWN/UNREACHABLE; cuenta fuentes online/offline por su última recepción y muestra separadamente errores o estados pendientes de servidores Thruk. Una consulta vacía solo se presenta como saludable cuando las fuentes están online y los snapshots son completos y exitosos. Si falta información, la interfaz advierte que la ausencia de alertas no confirma salud.
 
-La tabla presenta únicamente campos que envía el Gateway o que el receptor observa: fuente provisional (nombre e IP peer), servidor, backend, host, servicio, estado, confirmación del dato, acknowledgement, downtime y última recepción. El contrato no envía plugin output ni descripción; por eso no se muestran. Los filtros combinables cubren host, servicio, texto, severidad, servidor, backend, fuente, acknowledgement y downtime. Los encabezados permiten ordenar y la tabla pagina localmente los resultados.
+La tabla muestra fuente provisional (nombre e IP peer), servidor, backend, host, servicio, estado, Status Information, confirmación del dato, acknowledgement, downtime y última recepción. El texto largo se trunca visualmente y el tooltip permite consultar el contenido completo. La búsqueda general incluye Status Information. La tabla combina alertas y estados UP; las tarjetas de métricas siguen contando solo alertas. Los filtros combinables cubren host, servicio, texto, estado, servidor, backend, fuente, acknowledgement y downtime. Los encabezados permiten ordenar y la tabla pagina localmente los resultados.
 
 El dashboard consulta APIs del mismo origen mediante polling HTTP. El intervalo inicial es 5 segundos y se puede cambiar a 10, 15, 30 o 60 segundos desde la barra superior; esa preferencia se conserva en el navegador. El dashboard recorre las páginas de alertas del backend en lotes de hasta 500, sin truncar la lista por el límite de una página. Los filtros, el orden y la página actual se mantienen durante cada actualización. El selector de tema claro/oscuro también se guarda localmente.
 
-La pestaña **Historial de cambios** muestra aperturas, cambios de estado/atributos y recuperaciones que el backend observó en snapshots. No puede mostrar cambios transitorios que ocurrieron entre dos recepciones. La sección **Fuentes de información** muestra la antigüedad de cada webhook y el estado de cada servidor Thruk por separado. Los mensajes manuales `type: test` no crean fuentes.
+La pestaña **Historial de cambios** muestra aperturas, cambios de estado/atributos y recuperaciones que el backend observó en snapshots. No puede mostrar cambios transitorios que ocurrieron entre dos recepciones. La sección **Fuentes de información** muestra la antigüedad de cada webhook, conectividad y estado de cada servidor Thruk. Una fuente se considera inactiva tras `SOURCE_INACTIVE_AFTER_SECONDS` (24 horas por defecto); no se elimina automáticamente. El botón **Eliminar fuente inactiva** aparece solo al superar ese umbral y el backend vuelve a comprobarlo. La confirmación elimina sus snapshots, alertas, estados e historial de cambios de monitoreo. Conserva el historial de notificaciones, cancela entregas pendientes o en curso y mantiene las reglas y destinos. Una solicitud HTTP ya enviada al proveedor no se puede retirar y su resultado puede no registrarse como enviado. Si el mismo emisor vuelve a enviar un snapshot válido, reaparece con datos actuales. Los mensajes manuales `type: test` no crean fuentes.
 
 ## Ejecutar
 
@@ -106,6 +106,7 @@ Estas reglas aplican al backend iptables de Docker; no son persistentes en todas
 | `WEB_PORT` | `8080` | Puerto del host publicado por Compose. |
 | `BIND_ADDRESS` | `127.0.0.1` | Dirección del host donde Docker publica el puerto. Elige una IP LAN privada para recibir conexiones remotas. |
 | `OFFLINE_AFTER_SECONDS` | `900` | Segundos desde la última recepción antes de marcar una fuente offline. Configúralo por encima del intervalo del Gateway; ese intervalo no viaja en el JSON. |
+| `SOURCE_INACTIVE_AFTER_SECONDS` | `86400` | Segundos sin snapshots para permitir eliminar manualmente una fuente. No purga datos automáticamente y se mantiene separado del umbral offline. |
 | `MAX_REQUEST_BYTES` | `8388608` | Tamaño máximo del POST (8 MiB). |
 | `HISTORY_RETENTION_DAYS` | `90` | Retención del historial de cambios. `0` desactiva la limpieza automática. |
 | `NOTIFICATION_ALLOWED_DESTINATION_CIDRS` | vacío | Rangos privados permitidos para destinos Gotify, ntfy o webhook; usa un CIDR LAN concreto, por ejemplo `192.168.1.0/24`. |
@@ -134,9 +135,11 @@ Todas las rutas son mismo origen, no requieren autenticación y devuelven JSON:
 | Método y ruta | Uso |
 | --- | --- |
 | `GET /` | Dashboard visual, sin autenticación. |
-| `GET /api/v1/alerts` | Alertas activas con `source_id`, `server`, `state`, `type`, `stale`, `limit` y `offset` opcionales. |
+| `GET /api/v1/alerts` | Alertas activas con `status_information` y filtros opcionales `source_id`, `server`, `state`, `type`, `stale`, `limit` y `offset`. |
+| `GET /api/v1/statuses` | Todos los estados actuales: alertas activas más objetos UP recibidos en `ok_statuses[]`; incluye `status_information`, `stale` y filtros por fuente/servidor/backend/host/servicio/estado/tipo. |
 | `GET /api/v1/stats` | Total de alertas, agrupación por estado y fuentes online/offline. |
 | `GET /api/v1/sources` | Última recepción, frescura y estado de consultas por servidor. |
+| `DELETE /api/v1/sources/{source_id}` | Retira manualmente una fuente inactiva y sus datos actuales de monitoreo. No requiere autenticación; limita el puerto a una LAN confiable. |
 | `GET /api/v1/history` | Transiciones observadas; filtros `source_id`, `server`, `limit`, `offset`. |
 | `GET /healthz` | Salud del proceso y comprobación SQLite. |
 
@@ -146,7 +149,7 @@ La recuperación se fecha cuando el servidor web observa que la alerta ya no est
 
 El motor de notificaciones está apagado inicialmente. Los canales y reglas nuevos también comienzan deshabilitados. El contenedor `notifications` procesa la cola SQLite en segundo plano; si un proveedor falla, el receptor sigue almacenando snapshots. La sección **Notifications** permite configurar Rules, Channels, History y Settings desde el dashboard. La prueba de una regla solo muestra coincidencias; el botón de prueba de un canal sí intenta enviar un mensaje al destino configurado.
 
-Los eventos admitidos son apertura, cambio de estado, recuperación observada y recordatorio opcional. Un snapshot idéntico no vuelve a notificar. Una recuperación exige una respuesta `ok` del servidor Thruk correspondiente; errores y silencios no se tratan como recuperación. Las condiciones solo pueden usar los campos realmente presentes en el contrato. No hay plugin output ni un ID estable de instalación, por lo que no se pueden filtrar por esos datos. Las plantillas tampoco admiten `{output}`. Consulta el [diseño y límites del motor](docs/notification-design.md).
+Los eventos admitidos son apertura, cambio de estado, recuperación observada y recordatorio opcional. Un snapshot idéntico no vuelve a notificar. Una recuperación exige una respuesta `ok` del servidor Thruk correspondiente; errores y silencios no se tratan como recuperación. Los objetos UP recibidos en `ok_statuses[]` se guardan fuera del flujo de alertas y no crean notificaciones. Las reglas admiten filtros por `status_information`. No hay un ID estable de instalación. Consulta el [diseño y límites del motor](docs/notification-design.md).
 
 Los destinos soportados son Telegram, Gotify, ntfy y webhook HTTP. Telegram requiere bot token y chat ID; Gotify requiere URL de servidor y application token; ntfy requiere URL y topic, con credenciales opcionales; webhook HTTP requiere URL y admite headers y cuerpo JSON controlados. Las credenciales se cifran con una clave local externa a SQLite. Para crearla desde `web/`, primero construye la imagen y crea el directorio local:
 
@@ -169,6 +172,14 @@ docker compose up -d
 ```
 
 Guarda una copia de esa clave **separada** del backup SQLite, con acceso restringido. Si se pierde, los tokens cifrados existentes no pueden recuperarse; hay que configurarlos otra vez. Si cambias la clave sin recifrar los tokens, los canales con credenciales dejarán de enviar. `.local/` y `.env` no se incluyen en Git ni en la imagen. Para un Gotify o ntfy en LAN, declara solo su subred privada necesaria en `NOTIFICATION_ALLOWED_DESTINATION_CIDRS`, por ejemplo `192.168.1.0/24`, y recrea `web` y `notifications`. No uses un rango amplio como `0.0.0.0/0`.
+
+### Backup de configuración de Notifications
+
+En **Notifications → Settings → Backup y restauración**, descarga un JSON con los ajustes globales, reglas y condiciones (incluido `status_information`), canales, configuraciones de proveedor, plantillas y asociaciones. La exportación normal excluye credenciales y el preview advierte que esos canales se restaurarán deshabilitados. Para una copia completa usa **Exportar copia cifrada** y conserva la contraseña larga aparte. El formato y los límites están en [notification-backup-format.md](docs/notification-backup-format.md).
+
+Antes de reemplazar la configuración, la aplicación guarda hasta 10 puntos de recuperación locales en SQLite. Si necesitas revertir una restauración, usa **Recuperar configuración anterior** en la misma pantalla. Estas copias locales guardan los secretos cifrados con `.local/notification.key`; deben vivir junto con esa clave y no viajan en el JSON portable. El reemplazo se hace en una transacción, cancela las entregas pendientes y conserva el historial de notificaciones y el monitoreo actual. Ningún evento se vuelve a notificar por restaurar.
+
+Los backups no llevan autenticación propia: los endpoints y la interfaz heredan la restricción de LAN confiable de esta versión. La contraseña de un backup cifrado se envía al servicio local para cifrar o descifrar; con HTTP solo debe hacerse en una red de confianza. El tamaño máximo del archivo es 2 MiB y esta versión acepta el esquema 1. Una entrega que el worker ya haya enviado al proveedor no se puede cancelar desde la restauración.
 
 Puedes inspeccionar el worker con `docker compose logs --tail 100 notifications` y su estado con `docker compose ps`. El historial visual y la API de notificaciones muestran intentos, resultado y errores saneados. Los reintentos son limitados; debido a la ventana entre un POST externo exitoso y su confirmación en SQLite, un proveedor sin idempotencia puede recibir un duplicado tras un corte abrupto.
 
@@ -264,7 +275,7 @@ Descarga o cambia al código de la versión que vas a desplegar, haz una copia d
 
 ## Seguridad y límites operativos
 
-El requisito de esta versión es no tener autenticación: cualquier cliente que alcance el puerto puede leer alertas, enviar snapshots falsos, modificar reglas y destinos, y solicitar envíos de prueba. Úsala solo en una LAN confiable o VPN, no la publiques en Internet y limita el acceso desde el firewall del host y la segmentación de red. CORS no autentica clientes ni sustituye estas restricciones. El Gateway no incluye credenciales de Thruk en su JSON; el backend no registra cuerpos y nunca ejecuta los valores recibidos. SQL usa parámetros y el frontend inserta datos como texto. Los destinos de notificación pueden transportar datos de infraestructura fuera de la LAN si el operador los configura; revísalos antes de habilitarlos.
+El requisito de esta versión es no tener autenticación: cualquier cliente que alcance el puerto puede leer alertas, enviar snapshots falsos, modificar reglas y destinos, solicitar envíos de prueba y retirar fuentes inactivas. Úsala solo en una LAN confiable o VPN, no la publiques en Internet y limita el acceso desde el firewall del host y la segmentación de red. CORS no autentica clientes ni sustituye estas restricciones. El Gateway no incluye credenciales de Thruk en su JSON; el backend no registra cuerpos y nunca ejecuta los valores recibidos. SQL usa parámetros y el frontend inserta datos como texto. Los destinos de notificación pueden transportar datos de infraestructura fuera de la LAN si el operador los configura; revísalos antes de habilitarlos.
 
 La identidad del emisor sigue siendo provisional (`source` + IP observada); conexiones compartidas por NAT o proxy se mezclan. La validación física entre dos computadoras y el despliegue en Docker Engine Linux dependen de la red y firewall del host; en esta entrega se verificaron Docker Desktop en Windows 11 y dos emisores dentro de contenedores aislados.
 

@@ -6,8 +6,9 @@
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#101821">
   <title>NaftaMon Web — Monitoreo</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <script src="/static/dashboard.js" defer></script>
+  <link rel="icon" type="image/svg+xml" href="/favicon.ico">
+  <link rel="stylesheet" href="/static/dashboard.css?v=source-cleanup-20261016">
+  <script src="/static/dashboard.js?v=source-cleanup-20261016" defer></script>
   <script src="/static/notifications.js" defer></script>
 </head>
 <body>
@@ -94,21 +95,21 @@
     </div>
 
     <nav class="view-tabs" aria-label="Vistas del dashboard" role="tablist">
-      <button type="button" class="view-tab is-active" id="tab-alerts" role="tab" aria-selected="true" aria-controls="alerts-view">Alertas actuales <span class="tab-count" id="tab-alert-count">0</span></button>
+      <button type="button" class="view-tab is-active" id="tab-alerts" role="tab" aria-selected="true" aria-controls="alerts-view">Monitoreo actual <span class="tab-count" id="tab-alert-count">0</span></button>
       <button type="button" class="view-tab" id="tab-history" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">Historial de cambios</button>
     </nav>
 
     <section class="view-panel" id="alerts-view" role="tabpanel" aria-labelledby="tab-alerts">
       <div class="section-heading">
-        <div><h2>Alertas actuales</h2><p class="section-subtitle">Estado más reciente conocido por cada servidor</p></div>
-        <div class="section-meta"><span class="live-dot" aria-hidden="true"></span><span id="alert-count-label">0 alertas</span></div>
+        <div><h2>Monitoreo actual</h2><p class="section-subtitle">Estados de hosts y servicios recibidos desde NaftaMon Desktop</p></div>
+        <div class="section-meta"><span class="live-dot" aria-hidden="true"></span><span id="alert-count-label">0 elementos</span></div>
       </div>
 
       <form id="filters" class="filters" autocomplete="off">
         <label class="search-field search-host"><span>Host</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-host" type="search" placeholder="Buscar host…" aria-label="Buscar por host"></span></label>
         <label class="search-field search-service"><span>Servicio</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-service" type="search" placeholder="Buscar servicio…" aria-label="Buscar por servicio"></span></label>
-        <label class="search-field search-text"><span>Texto</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-text" type="search" placeholder="Servidor, backend…" aria-label="Buscar en los datos de la alerta"></span></label>
-        <label class="select-field"><span>Severidad</span><select id="filter-severity"><option value="">Todas</option><option>CRITICAL</option><option>WARNING</option><option>UNKNOWN</option><option>DOWN</option><option>UNREACHABLE</option></select></label>
+        <label class="search-field search-text"><span>Texto</span><span class="input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="filter-text" type="search" placeholder="Servidor, backend, Status Information…" aria-label="Buscar en los datos de monitoreo"></span></label>
+        <label class="select-field"><span>Estado</span><select id="filter-severity"><option value="">Todos</option><option>CRITICAL</option><option>WARNING</option><option>UNKNOWN</option><option>DOWN</option><option>UNREACHABLE</option><option value="UP">UP / OK</option></select></label>
         <label class="select-field"><span>Servidor</span><select id="filter-server"><option value="">Todos</option></select></label>
         <label class="select-field"><span>Backend</span><select id="filter-backend"><option value="">Todos</option></select></label>
         <label class="select-field"><span>Fuente</span><select id="filter-source"><option value="">Todas</option></select></label>
@@ -117,8 +118,8 @@
         <button class="clear-filters" id="clear-filters" type="button">Limpiar filtros</button>
       </form>
 
-      <div class="table-toolbar"><span id="filtered-count">Mostrando 0 alertas</span><span class="table-hint">Selecciona un encabezado para ordenar</span></div>
-      <div class="table-scroll" tabindex="0" aria-label="Tabla de alertas, desplazamiento horizontal disponible">
+      <div class="table-toolbar"><span id="filtered-count">Mostrando 0 hosts y servicios</span><label class="page-size-control" for="page-size"><span>Elementos por página</span><select id="page-size" aria-label="Elementos por página"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="250">250</option><option value="all">Todos</option></select></label><span class="table-hint">Selecciona un encabezado para ordenar</span></div>
+      <div class="table-scroll" id="monitoring-scroll" tabindex="0" aria-label="Tabla de monitoreo; desplazamiento horizontal disponible en pantallas pequeñas">
         <table class="alerts-table">
           <thead><tr>
             <th scope="col"><button data-sort="source" type="button" aria-label="Ordenar por fuente">Fuente <span class="sort-mark"></span></button></th>
@@ -127,6 +128,7 @@
             <th scope="col"><button data-sort="host" type="button">Host <span class="sort-mark"></span></button></th>
             <th scope="col"><button data-sort="service" type="button">Servicio <span class="sort-mark"></span></button></th>
             <th scope="col"><button data-sort="state" type="button" aria-sort="ascending">Estado <span class="sort-mark">↑</span></button></th>
+            <th scope="col"><button data-sort="status_information" type="button">Status Information <span class="sort-mark"></span></button></th>
             <th scope="col">Confirmación</th><th scope="col">Acknowledgement</th><th scope="col">Downtime</th>
             <th scope="col"><button data-sort="last_seen_at" type="button">Última recepción <span class="sort-mark"></span></button></th>
           </tr></thead>
@@ -151,7 +153,7 @@
     </section>
 
     <section class="sources-section" aria-labelledby="sources-title">
-      <div class="section-heading"><div><h2 id="sources-title">Fuentes de información</h2><p class="section-subtitle">Conectividad del emisor y estado de cada servidor Thruk</p></div><span id="source-count-label" class="section-meta">0 fuentes</span></div>
+      <div class="section-heading"><div><h2 id="sources-title">Fuentes de información</h2><p class="section-subtitle">Última recepción, conectividad y actividad del emisor. Las fuentes inactivas no se eliminan automáticamente.</p></div><span id="source-count-label" class="section-meta">0 fuentes</span></div>
       <div class="sources-grid" id="sources-grid"></div>
       <div class="sources-empty" id="sources-empty" hidden>Sin fuentes registradas. Los mensajes de prueba no crean fuentes.</div>
     </section>
@@ -209,6 +211,37 @@
         <div class="setting-row retention-row"><div><strong>Retención del historial</strong><p>Las entregas anteriores se eliminan según este plazo. Usa 0 para conservarlas sin limpieza automática.</p></div><label class="retention-input"><span>Días</span><input id="settings-retention-days" type="number" min="0" max="3650" step="1" required></label></div>
         <div class="settings-footer"><span id="settings-updated-at" class="muted-text">—</span><button class="primary-action" type="submit" id="save-notification-settings">Guardar cambios</button></div>
       </form>
+      <section class="settings-card backup-card" aria-labelledby="notification-backup-title">
+        <div class="backup-heading"><div><h3 id="notification-backup-title">Backup y restauración</h3><p>Guarda o recupera reglas, canales, configuración global y sus asociaciones.</p></div></div>
+        <div class="backup-grid">
+          <div class="backup-panel">
+            <h4>Exportar configuración</h4>
+            <p>El archivo JSON no incluye credenciales. Al restaurarlo, los canales que las tenían quedarán deshabilitados hasta volver a configurarlas.</p>
+            <button class="secondary-action" id="export-notification-backup" type="button">Exportar configuración</button>
+            <details class="encrypted-backup-options">
+              <summary>Incluir credenciales en una copia cifrada</summary>
+              <p>Usa una contraseña larga que puedas conservar por separado. No se guarda en NaftaMon y no se puede recuperar si la pierdes.</p>
+              <label class="backup-field"><span>Contraseña de cifrado (mínimo 12 caracteres)</span><input id="backup-export-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
+              <label class="backup-field"><span>Repetir contraseña</span><input id="backup-export-password-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
+              <button class="primary-action" id="export-encrypted-notification-backup" type="button">Exportar copia cifrada</button>
+            </details>
+          </div>
+          <div class="backup-panel">
+            <h4>Restaurar configuración</h4>
+            <p>Selecciona un JSON de NaftaMon. Primero se valida y muestra una vista previa; la restauración reemplaza reglas y canales actuales.</p>
+            <label class="backup-field"><span>Archivo JSON</span><input id="notification-backup-file" type="file" accept="application/json,.json"></label>
+            <label class="backup-field"><span>Contraseña (solo para backups cifrados)</span><input id="backup-import-password" type="password" autocomplete="current-password" maxlength="1024"></label>
+            <button class="secondary-action" id="preview-notification-backup" type="button">Validar y previsualizar</button>
+            <div id="notification-backup-preview" class="backup-preview" aria-live="polite" hidden></div>
+            <button class="danger-action" id="restore-notification-backup" type="button" disabled>Reemplazar configuración actual</button>
+          </div>
+        </div>
+        <div class="previous-backup" id="previous-notification-backup" hidden>
+          <div><strong>Copia previa al último reemplazo</strong><p id="previous-notification-backup-info">—</p></div>
+          <button class="secondary-action" id="restore-previous-notification-backup" type="button">Recuperar configuración anterior</button>
+        </div>
+        <p class="backup-scope-note">El backup no incluye alertas, hosts, servicios, fuentes ni historial de entregas. La aplicación no tiene autenticación: restringe este control con el firewall a una LAN confiable.</p>
+      </section>
       <div class="security-note"><span aria-hidden="true">⚠</span><div><strong>Acceso sin autenticación</strong><p>Cualquier equipo que alcance esta aplicación puede cambiar reglas, destinos y solicitar pruebas. Restringe el puerto mediante firewall a una LAN confiable. Los valores secretos solo se muestran en el momento de introducirlos.</p></div></div>
     </section>
 
@@ -222,7 +255,7 @@
       <div class="dialog-body">
         <input id="rule-id" type="hidden">
         <div class="form-grid"><label class="form-field"><span>Nombre <em>requerido</em></span><input id="rule-name" type="text" maxlength="100" required placeholder="Ej. Disco crítico en bases de datos"></label><label class="form-field"><span>Descripción <small>opcional</small></span><input id="rule-description" type="text" maxlength="1000" placeholder="Cuándo y por qué se usa esta regla"></label></div>
-        <fieldset class="form-section"><legend>Condiciones</legend><div class="condition-toolbar"><label class="form-field compact"><span>Coincidencia</span><select id="rule-condition-operator"><option value="AND">Todas las condiciones (AND)</option><option value="OR">Cualquiera (OR)</option></select></label><button class="secondary-action small-action" id="add-condition" type="button">＋ Condición</button></div><div id="rule-condition-list" class="condition-list"></div><p class="field-hint">Se comparan campos del Gateway; plugin output no está disponible. Wildcard admite * y ?.</p></fieldset>
+        <fieldset class="form-section"><legend>Condiciones</legend><div class="condition-toolbar"><label class="form-field compact"><span>Coincidencia</span><select id="rule-condition-operator"><option value="AND">Todas las condiciones (AND)</option><option value="OR">Cualquiera (OR)</option></select></label><button class="secondary-action small-action" id="add-condition" type="button">＋ Condición</button></div><div id="rule-condition-list" class="condition-list"></div><p class="field-hint">Status Information se compara sin distinguir mayúsculas. Si el campo no está disponible, no coincide, también con operadores negativos. Wildcard admite * y ? en los demás campos.</p></fieldset>
         <fieldset class="form-section"><legend>Eventos que notifican</legend><div class="event-options"><label><input type="checkbox" name="rule-event" value="opened"><span>Nueva alerta</span></label><label><input type="checkbox" name="rule-event" value="state_changed"><span>Cambio de estado</span></label><label><input type="checkbox" name="rule-event" value="recovered"><span>Recuperación</span></label><label><input type="checkbox" name="rule-event" value="reminder"><span>Recordatorio</span></label></div></fieldset>
         <fieldset class="form-section"><legend>Destinos y frecuencia</legend><div class="channel-choice-list" id="rule-channel-choices"><p class="field-hint">Cargando canales…</p></div><div class="form-grid frequency-grid"><label class="form-field"><span>Cooldown por episodio <small>segundos</small></span><input id="rule-cooldown" type="number" min="0" max="31536000" step="1" value="0"></label><label class="form-field"><span>Recordatorio cada <small>opcional · segundos</small></span><input id="rule-reminder" type="number" min="1" max="31536000" step="1" placeholder="Desactivado"></label></div></fieldset>
         <fieldset class="form-section"><legend>Plantillas</legend><label class="form-field"><span>Asunto</span><input id="rule-subject-template" type="text" maxlength="500" required></label><label class="form-field"><span>Mensaje</span><textarea id="rule-body-template" rows="3" maxlength="2000" required></textarea></label><p class="field-hint">Variables admitidas: {source}, {source_id}, {server}, {backend}, {host}, {service}, {type}, {state}, {old_state}, {timestamp}, {event_type}, {acknowledged}, {downtime}.</p></fieldset>
@@ -261,6 +294,12 @@
   <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
     <div class="dialog-heading"><div><p class="eyebrow">CONFIRMAR ACCIÓN</p><h2 id="confirm-title">¿Continuar?</h2></div><button class="dialog-close" type="button" data-close-dialog="confirm-dialog" aria-label="Cerrar">×</button></div>
     <div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button class="secondary-action" type="button" data-close-dialog="confirm-dialog">Cancelar</button><button class="danger-action" id="confirm-accept" type="button">Eliminar</button></div>
+  </dialog>
+
+  <dialog class="confirm-dialog source-delete-dialog" id="source-delete-dialog" aria-labelledby="source-delete-title">
+    <div class="dialog-heading"><div><p class="eyebrow">FUENTE INACTIVA</p><h2 id="source-delete-title">Eliminar fuente</h2></div><button class="dialog-close" id="source-delete-close" type="button" aria-label="Cerrar">×</button></div>
+    <div class="dialog-body"><p id="source-delete-message"></p><p class="source-delete-warning">Se quitarán sus hosts, servicios, estados actuales e historial de cambios. El historial de notificaciones se conserva; las entregas pendientes o en curso se marcan canceladas. Un POST que ya salió hacia el proveedor no se puede retirar. Si vuelve a enviar datos válidos, la fuente reaparecerá.</p><p id="source-delete-error" class="source-delete-error" role="alert" hidden></p></div>
+    <div class="dialog-footer"><button class="secondary-action" id="source-delete-cancel" type="button">Cancelar</button><button class="danger-action" id="source-delete-accept" type="button">Eliminar fuente</button></div>
   </dialog>
 </body>
 </html>

@@ -61,11 +61,15 @@ complete de raíz representa completitud de consultas Thruk, no conectividad del
 
 | Tabla | Clave y propósito |
 | --- | --- |
-| sources | ID local, valor source recibido, IP observada del peer como agrupador provisional, primera/última recepción, último timestamp de payload, completitud del último snapshot y revisión local monotónica por recepción. No hay columna instance_id en el contrato actual; si Desktop la incorpora, se añadirá con una migración. Frescura derivada de last_received_at y umbral local configurable. Los mensajes test no crean/actualizan una fuente ni su frescura. |
+| sources | ID local, valor source recibido, IP observada del peer como agrupador provisional, primera/última recepción, último timestamp de payload, completitud del último snapshot y revisión local monotónica por recepción. `deleted_at` marca una fuente retirada manualmente; la fila tombstone conserva la referencia `source_id` del historial de notificaciones. No hay columna instance_id en el contrato actual; si Desktop la incorpora, se añadirá con una migración. Frescura derivada de last_received_at y umbral local configurable. Los mensajes test no crean/actualizan una fuente ni su frescura. |
 | latest_snapshots | Un registro por source_id con JSON periódico más reciente, timestamp del Gateway, received_at, complete y hash canónico. Tests no reemplazan este registro. No guardar una fila por cada intervalo idéntico. |
 | monitored_servers | Una fila por source_id + server; último estado ok/error/pending, última recepción de estado, última consulta ok y revisión local del snapshot que confirmó ese estado. El Gateway no expone detalle del error. |
-| active_alerts | Una fila por source_id + server + backend + type + host + service. Guarda campos de alerta, first_seen_at y last_seen_at; `stale` se deriva del estado del servidor y la frescura de fuente. No usar state como parte de la clave. |
+| active_alerts | Una fila por source_id + server + backend + type + host + service. Guarda campos de alerta, `status_information`, first_seen_at y last_seen_at; `stale` se deriva del estado del servidor y la frescura de fuente. No usar state como parte de la clave. |
+| monitored_statuses | Una fila por source_id + server + backend + type + host + service para los objetos UP de `ok_statuses[]`. Guarda `status_information` y el timestamp de snapshot que confirmó cada fila. Se mantiene separado de alertas, historial y notificaciones. |
 | alert_history | Transiciones observadas: apertura, cambio de estado, cambio de hard/acknowledged/downtime y recuperación. Guarda clave de alerta, valores anterior/nuevo y observed_at del servidor web. |
+| notification_settings, notification_channels, notification_rules, notification_rule_channels | Configuración global, ajustes de proveedor, secretos cifrados, filtros/plantillas y asociaciones de reglas con canales. Los IDs locales se usan en SQLite, pero el JSON de backup relaciona reglas y canales con claves portables propias del archivo. |
+| notification_config_backups | Hasta 10 copias locales previas a una restauración. Solo contienen configuración; secretos cifrados con la clave externa `notification.key`. No forman parte del JSON portable ni incluyen datos de monitoreo o historial de entregas. |
+| notification_events, notification_deliveries, notification_attempts, notification_suppression_state | Eventos y ejecución del motor. No se incluyen en backups portables; restaurar configuración conserva eventos/entregas históricos existentes, cancela pendientes y reemplaza las asociaciones actuales. |
 | schema_version | Versión local del esquema para evolución controlada. |
 
 Nombres configurados de servidor/backend y display name pueden cambiar; la clave no es un ID inmutable garantizado por Thruk. Un cambio puede parecer una alerta cerrada y otra nueva.
@@ -74,7 +78,10 @@ Nombres configurados de servidor/backend y display name pueden cambiar; la clave
 
 - Actualizar last_received_at aunque el snapshot sea idéntico.
 - Calcular y almacenar el hash del contenido normalizado sin el timestamp raíz. Los POST idénticos refrescan recepción sin duplicar filas de alertas ni eventos de historial; el backend todavía reconcilia y escribe el snapshot actual en SQLite.
+- Comparar el `timestamp` UTC raíz antes de aplicar cada snapshot. Una recepción más antigua se acepta sin error, actualiza la hora observada de recepción y no reemplaza el último snapshot ni el estado persistido.
 - Comparar por clave compuesta. Crear historia por presencia, estado o cambio de flags relevantes. Cambio de last_check no crea por sí solo un evento de estado.
+- Para cada servidor `ok`, reconciliar `ok_statuses[]` si la propiedad está presente. Una lista vacía es autoritativa y elimina sus filas UP anteriores; si la propiedad falta en un webhook antiguo, preservar el último dato conocido y dejarlo marcado como desactualizado frente al snapshot actual.
+- Actualizar `status_information` cuando viene en el elemento, incluso si vale `""`; si una versión anterior omite el campo, preservar el texto almacenado. Los cambios de ese campo no son transiciones de alerta.
 - En servidor ok, alerta ausente se registra recuperada a la hora de observación web, no como instante real de recuperación.
 - Nunca recuperar alertas por servidores error/pending, por servidores ausentes en snapshot incompleto ni por silencio del emisor.
 - Si complete true y un servidor conocido ya no aparece, marcarlo retirado/no configurado y conservar historial; no declarar recuperadas sus alertas solo porque se quitó de la configuración.
@@ -92,15 +99,31 @@ No hay autenticación en dashboard, receptor ni APIs. Las rutas usan mismo orige
 | POST /api/v1/ingest | Recibir test o snapshot. Sin autenticación; agrupación provisional por source + peer IP observada. |
 | GET /api/v1/stats | Totales de alertas, agrupación por estado y fuentes online/offline. |
 | GET /api/v1/sources | Fuentes, última recepción y estado de sus servidores. |
+| DELETE /api/v1/sources/{source_id} | Retirar manualmente una fuente que superó `SOURCE_INACTIVE_AFTER_SECONDS`; borra su snapshot, estados y datos actuales de monitoreo. No requiere autenticación. |
 | GET /api/v1/alerts | Alertas actuales; filtros opcionales por source_id, server, state, type y stale, más paginación. |
+| GET /api/v1/statuses | Estados de monitoreo actuales (alertas más estados UP de `ok_statuses[]`); filtros por source_id, server, backend, host, service, state y type, más paginación. Incluye `status_information` y `stale`. |
 | GET /api/v1/history | Transiciones observadas; filtros por source_id/server y límite de paginación. |
+| POST /api/v1/notifications/backup/export | Descarga configuración versionada JSON; contraseña opcional cifra credenciales para migración. |
+| POST /api/v1/notifications/backup/preview | Valida un archivo y devuelve cantidades/advertencias sin modificar SQLite. |
+| POST /api/v1/notifications/backup/restore | Reemplaza settings, canales, reglas y asociaciones dentro de una transacción, previa copia local recuperable. |
+| GET /api/v1/notifications/backup/previous; POST /api/v1/notifications/backup/restore-previous | Consulta y recupera la copia local más reciente antes de un reemplazo. |
 | GET /healthz | Salud del proceso; comprueba versión y presencia de tablas requeridas mediante consultas pequeñas, sin recorrer el archivo completo ni datos sensibles. No certifica integridad completa ni capacidad de escritura del volumen. |
 
-La UI local se sirve desde `/static/dashboard.css` y `/static/dashboard.js`. Consulta `/healthz`, `/api/v1/alerts` (en lotes paginados de hasta 500), `/api/v1/sources` y, cuando se abre la pestaña de historial, `/api/v1/history`. El intervalo inicial es 5 s y puede configurarse entre 5 y 60 s; el navegador conserva la selección. La tabla muestra 50 alertas por página y filtra/ordena el conjunto completo en cliente. El historial se consulta en páginas de 50 registros.
+La UI local se sirve desde `/static/dashboard.css` y `/static/dashboard.js`. Consulta `/healthz`, `/api/v1/statuses` (en lotes paginados de hasta 500), `/api/v1/sources` y, cuando se abre la pestaña de historial, `/api/v1/history`. La tabla muestra alertas y estados UP, con `status_information`; las métricas de alerta se calculan solo con estados distintos de UP. `/api/v1/alerts` sigue disponible para consumidores que solo requieren alertas activas. El intervalo inicial es 5 s y puede configurarse entre 5 y 60 s; el navegador conserva la selección. La tabla muestra 50 elementos por página y filtra/ordena el conjunto completo en cliente. El historial se consulta en páginas de 50 registros.
 
-Las estadísticas de severidad se calculan con las alertas recuperadas de la API paginada y la disponibilidad del emisor se deriva de `last_received_at`/`age_seconds` en `/api/v1/sources`. Así se evitan diferencias temporales entre conteos de solicitudes separadas a `/api/v1/stats`. Una condición sin alertas solo se presenta como saludable si cada fuente está dentro del umbral y su snapshot es completo con servidores `ok`. Estados parciales, fallidos, stale u offline se indican por separado. El Gateway no envía plugin output ni descripciones; el dashboard los omite.
+Las estadísticas de severidad se calculan a partir de los registros no UP obtenidos de la API paginada y la disponibilidad del emisor se deriva de `last_received_at`/`age_seconds` en `/api/v1/sources`. Así se evitan diferencias temporales entre conteos de solicitudes separadas a `/api/v1/stats`. Una condición sin alertas solo se presenta como saludable si cada fuente está dentro del umbral y su snapshot es completo con servidores `ok`. Estados parciales, fallidos, stale u offline se indican por separado.
 
 Respuestas de POST sugeridas: 202 tras aceptar y persistir; 400 JSON/estructura inválida; 413 cuerpo demasiado grande; 415 tipo de contenido no soportado. Límite inicial sugerido: 8 MiB configurable.
+
+### Retiro manual de fuentes
+
+`OFFLINE_AFTER_SECONDS` conserva el criterio actual de conectividad/stale. `SOURCE_INACTIVE_AFTER_SECONDS` es un umbral separado (86400 por defecto) que habilita el retiro manual; no existe purga automática. El backend responde 409 si la fuente recibió datos dentro del umbral. El retiro borra sus estados actuales, snapshots e historial de cambios y marca canceladas sus entregas pendientes o en curso. Conserva el historial de notificaciones y reglas/destinos. Una solicitud HTTP ya enviada al proveedor no se puede retirar y su resultado puede no registrarse como enviado. Se mantiene una fila tombstone mínima para conservar las referencias de `source_id` del historial; el próximo snapshot válido del mismo `source + peer IP` la reactiva y empieza una observación limpia.
+
+El dashboard y la API no tienen autenticación. Cualquier cliente que alcance el puerto puede invocar la eliminación. Publica el servicio solo en loopback o una IP privada de confianza y restringe Windows Defender Firewall a los equipos/subredes necesarios. El botón y el diálogo de confirmación no sustituyen al firewall.
+
+### Backup de configuración de notificaciones
+
+El contrato versionado y los procedimientos de exportación/restauración están en [notification-backup-format.md](notification-backup-format.md). El archivo contiene solo configuración de Notifications. Una copia cifrada protege credenciales con Fernet y PBKDF2-HMAC-SHA256; al importarla, los secretos se vuelven a cifrar con la clave de la instalación de destino. Las restauraciones guardan hasta 10 puntos locales previos en `notification_config_backups`, cifrando sus secretos con `notification.key`. El reemplazo no importa alertas/eventos ni crea entregas; conserva el monitoreo e historial existentes, cancela entregas pendientes y actualiza las referencias de configuración dentro de una transacción.
 
 ## Docker Compose y red
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 
 # Add future schema changes as transactional SQL statements keyed by version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
@@ -205,6 +205,51 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_notification_events_date ON notification_events(occurred_at DESC)",
         "CREATE INDEX idx_notification_attempts_delivery ON notification_attempts(delivery_id, attempt_number DESC)",
         "INSERT INTO notification_settings(id, enabled, history_retention_days, updated_at) VALUES (1, 0, 90, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+    ),
+    5: (
+        "ALTER TABLE active_alerts ADD COLUMN status_information TEXT NOT NULL DEFAULT ''",
+        """CREATE TABLE monitored_statuses (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+            server TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            host TEXT NOT NULL,
+            service TEXT NOT NULL,
+            type TEXT NOT NULL CHECK (type IN ('host', 'service')),
+            state TEXT NOT NULL CHECK (state = 'UP'),
+            status_information TEXT NOT NULL DEFAULT '',
+            hard INTEGER NOT NULL CHECK (hard IN (0, 1)),
+            acknowledged INTEGER NOT NULL CHECK (acknowledged IN (0, 1)),
+            downtime INTEGER NOT NULL CHECK (downtime IN (0, 1)),
+            last_check TEXT NOT NULL,
+            last_change TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            snapshot_timestamp TEXT NOT NULL,
+            UNIQUE (source_id, server, backend, type, host, service)
+        )""",
+        "CREATE INDEX idx_monitored_statuses_source_server ON monitored_statuses(source_id, server)",
+    ),
+    6: (
+        "ALTER TABLE active_alerts ADD COLUMN status_information_available INTEGER NOT NULL DEFAULT 0 CHECK (status_information_available IN (0, 1))",
+        # Existing non-empty values are known to have been received; empty legacy
+        # values are ambiguous, so leave them unavailable and prevent false matches.
+        "UPDATE active_alerts SET status_information_available = 1 WHERE status_information <> ''",
+    ),
+    7: (
+        # Retain a minimal source tombstone so notification history can keep its
+        # source_id foreign key while all current monitoring state is removed.
+        "ALTER TABLE sources ADD COLUMN deleted_at TEXT",
+        "CREATE INDEX idx_sources_deleted_source_peer ON sources(deleted_at, source_name, peer_ip)",
+    ),
+    8: (
+        """CREATE TABLE notification_config_backups (
+            id INTEGER PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            secrets_ciphertext TEXT
+        )""",
+        "CREATE INDEX idx_notification_config_backups_created ON notification_config_backups(id DESC)",
     ),
 }
 

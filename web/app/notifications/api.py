@@ -14,6 +14,19 @@ from pydantic import ValidationError
 from ..db import connect
 from .channel_validation import ChannelValidationError, validate_channel_configuration, validate_secrets
 from .crypto import SecretStoreUnavailable, decrypt_secrets, encrypt_secrets
+from .backups import (
+    BACKUP_MAX_BYTES,
+    BACKUP_REQUEST_MAX_BYTES,
+    BackupValidationError,
+    export_document,
+    decode_pre_restore_backup,
+    parse_json_document,
+    persist_pre_restore_backup,
+    preview_summary,
+    previous_backup_summary,
+    replace_configuration,
+    validate_document,
+)
 from .providers import send_notification
 from .rules import RuleValidationError, rule_matches, validate_conditions, validate_events, validate_template
 from .schemas import ChannelWrite, NotificationSettingsWrite, RuleWrite
@@ -42,6 +55,34 @@ router = APIRouter(
 
 def now_text() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+async def _read_backup_body(request: Request) -> dict[str, Any]:
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(415, "Content-Type must be application/json")
+    raw = await request.body()
+    if len(raw) > BACKUP_REQUEST_MAX_BYTES:
+        raise HTTPException(413, "El backup supera el límite de 2 MiB.")
+    try:
+        value = parse_json_document(raw)
+    except BackupValidationError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return value
+
+
+def _backup_request_fields(value: dict[str, Any], *, include_confirmation: bool = False) -> tuple[dict[str, Any], str | None]:
+    expected = {"backup", "password"}
+    if include_confirmation:
+        expected.add("confirm_replace")
+    if set(value) != expected or not isinstance(value.get("backup"), dict):
+        raise HTTPException(400, "La solicitud de backup tiene una estructura inválida.")
+    password = value.get("password")
+    if password is not None and not isinstance(password, str):
+        raise HTTPException(400, "La contraseña del backup debe ser texto.")
+    if include_confirmation and value.get("confirm_replace") is not True:
+        raise HTTPException(409, "Confirma explícitamente el reemplazo de la configuración actual.")
+    return value["backup"], password
 
 
 def _json_or_error(raw: str, label: str) -> Any:
@@ -180,6 +221,120 @@ def put_settings(value: NotificationSettingsWrite):
                 (updated,),
             )
     return {"enabled": value.enabled, "history_retention_days": value.history_retention_days, "updated_at": updated}
+
+
+@router.post("/backup/export")
+async def export_notification_backup(request: Request):
+    value = await _read_backup_body(request)
+    if set(value) != {"password"}:
+        raise HTTPException(400, "La solicitud de exportación tiene una estructura inválida.")
+    password = value["password"]
+    if password is not None and not isinstance(password, str):
+        raise HTTPException(400, "La contraseña del backup debe ser texto.")
+    try:
+        with connect(_database_path()) as db:
+            document = export_document(db, password)
+        encoded = json.dumps(document, ensure_ascii=False, allow_nan=False, indent=2).encode("utf-8")
+    except BackupValidationError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except SecretStoreUnavailable:
+        raise HTTPException(503, "No se pudo acceder al almacén de secretos; no se exportó el backup.") from None
+    if len(encoded) > BACKUP_MAX_BYTES:
+        raise HTTPException(413, "La configuración exportada supera el límite de 2 MiB.")
+    date = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return JSONResponse(
+        document,
+        headers={
+            "Content-Disposition": f'attachment; filename="naftamon-notifications-{date}.json"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/backup/preview")
+async def preview_notification_backup(request: Request):
+    value = await _read_backup_body(request)
+    backup, password = _backup_request_fields(value)
+    try:
+        normalized = validate_document(backup, password)
+    except BackupValidationError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return preview_summary(normalized)
+
+
+@router.post("/backup/restore")
+async def restore_notification_backup(request: Request):
+    value = await _read_backup_body(request)
+    backup, password = _backup_request_fields(value, include_confirmation=True)
+    try:
+        normalized = validate_document(backup, password)
+    except BackupValidationError as exc:
+        raise HTTPException(422, str(exc)) from None
+    timestamp = now_text()
+    try:
+        # Commit the local recovery point before opening the replacement transaction.
+        with connect(_database_path()) as db:
+            persist_pre_restore_backup(db, timestamp)
+        with connect(_database_path()) as db:
+            replace_configuration(db, normalized, timestamp)
+    except BackupValidationError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except SecretStoreUnavailable:
+        raise HTTPException(503, "No se pudo asegurar la copia previa con la clave de notificaciones; no se aplicó el reemplazo.") from None
+    except sqlite3.Error:
+        raise HTTPException(500, "No se pudo reemplazar la configuración; la configuración anterior fue conservada.") from None
+    return {
+        "restored": True,
+        "rules": len(normalized["rules"]),
+        "channels": len(normalized["channels"]),
+        "warnings": normalized["warnings"],
+        "updated_at": timestamp,
+    }
+
+
+@router.get("/backup/previous")
+def get_previous_notification_backup():
+    try:
+        with connect(_database_path()) as db:
+            return previous_backup_summary(db)
+    except BackupValidationError as exc:
+        raise HTTPException(500, str(exc)) from None
+
+
+@router.post("/backup/restore-previous")
+async def restore_previous_notification_backup(request: Request):
+    value = await _read_backup_body(request)
+    if set(value) != {"confirm_replace"} or value["confirm_replace"] is not True:
+        raise HTTPException(409, "Confirma explícitamente el reemplazo de la configuración actual.")
+    try:
+        with connect(_database_path()) as db:
+            row = db.execute(
+                "SELECT id, created_at, snapshot_json, secrets_ciphertext FROM notification_config_backups ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "No hay una copia previa disponible.")
+            previous = dict(row)
+        normalized = decode_pre_restore_backup(previous["snapshot_json"], previous["secrets_ciphertext"])
+        timestamp = now_text()
+        # Preserve the current configuration as another recovery point before rollback.
+        with connect(_database_path()) as db:
+            persist_pre_restore_backup(db, timestamp)
+        with connect(_database_path()) as db:
+            replace_configuration(db, normalized, timestamp)
+    except BackupValidationError as exc:
+        raise HTTPException(500, str(exc)) from None
+    except SecretStoreUnavailable:
+        raise HTTPException(503, "No se pudo acceder a la clave de notificaciones; la configuración actual fue conservada.") from None
+    except sqlite3.Error:
+        raise HTTPException(500, "No se pudo recuperar la copia previa; la configuración actual fue conservada.") from None
+    return {
+        "restored": True,
+        "rules": len(normalized["rules"]),
+        "channels": len(normalized["channels"]),
+        "warnings": normalized["warnings"],
+        "updated_at": timestamp,
+        "recovered_backup_created_at": previous["created_at"],
+    }
 
 
 @router.get("/channels")
@@ -452,6 +607,8 @@ def test_rule(rule_id: int):
             "service": alert["service"], "state": alert["state"], "hard": bool(alert["hard"]),
             "acknowledged": bool(alert["acknowledged"]), "downtime": bool(alert["downtime"]),
         }
+        if alert["status_information_available"]:
+            context["status_information"] = alert["status_information"]
         if rule_matches(context, conditions):
             matches.append({key: context[key] for key in ("source_id", "server", "backend", "type", "host", "service", "state")})
     return {"dry_run": True, "sent": False, "total_examined": len(alerts), "match_count": len(matches), "matches": matches}

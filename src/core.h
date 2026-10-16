@@ -22,7 +22,8 @@ struct Item {
     bool hard = true;
     qint64 lastCheck = 0, lastChange = 0;
     int attempt = 0, maxAttempts = 0;
-    QString output;
+    QString output;  // original plugin output; the Gateway sends this without rewriting it
+    QString displayOutput() const { QString text = output; return text.replace('\n', ' ').trimmed(); }
     bool ack = false, downtime = false, flapping = false, passive = false, notifDisabled = false;
     HostFlags hostInfo;  // services only
     // flags of the service's host (Nagstamon's host_flags column), empty for host items
@@ -70,10 +71,14 @@ struct Filters {
     RegexFilter reHost, reService, reInfo, reDuration, reAttempt;
 };
 
-// Result of one poll of one server: DOWN/UNREACHABLE host rows and service problem rows.
+// Result of one poll: problem rows for the existing alert path plus UP/OK rows
+// kept separately for complete monitoring snapshots.
 struct RawStatus {
     QVector<Item> hosts;
     QVector<Item> services;
+    // UP hosts and OK services from the same full poll; kept apart so the
+    // existing alert/filter path continues to contain problem items only.
+    QVector<Item> okStatuses;
 };
 
 // Nagstamon GenericServer.get_status() filter pass: returns visible problem items.

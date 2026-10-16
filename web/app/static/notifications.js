@@ -9,15 +9,20 @@
     rulePage: 0, channelPage: 0, historyPage: 0, pageSize: 20,
     route: "monitor", loaded: false, loading: false, reloadAfterCurrent: false, confirmAction: null,
     testChannelId: null, toastTimer: null, channelHeaders: [],
+    backupDocument: null, backupPreview: null, previousBackup: null,
   };
   const FIELD_OPTIONS = [
     ["source", "Fuente NaftaMon"], ["source_id", "ID local de fuente"], ["server", "Servidor Thruk"],
     ["backend", "Backend"], ["type", "Tipo de alerta"], ["host", "Host"], ["service", "Servicio"],
-    ["state", "Estado"], ["hard", "Hard state"], ["acknowledged", "Acknowledgement"], ["downtime", "Downtime"],
+    ["state", "Estado"], ["status_information", "Status Information"], ["hard", "Hard state"], ["acknowledged", "Acknowledgement"], ["downtime", "Downtime"],
   ];
   const OP_OPTIONS = [
     ["equals", "Igual a"], ["not_equals", "Distinto de"], ["contains", "Contiene"],
     ["not_contains", "No contiene"], ["starts_with", "Comienza con"], ["ends_with", "Termina con"], ["wildcard", "Wildcard (*, ?)"],
+  ];
+  const STATUS_INFORMATION_OP_OPTIONS = [
+    ["contains", "Contiene"], ["not_contains", "No contiene"],
+    ["equals", "Es exactamente igual"], ["not_equals", "No es exactamente igual"],
   ];
   const EVENT_LABELS = { opened: "Nueva alerta", state_changed: "Cambio de estado", recovered: "Recuperación", reminder: "Recordatorio" };
   const STATUS_LABELS = { pending: "Pendiente", in_flight: "En curso", sent: "Enviado", failed: "Fallido", cancelled: "Cancelado" };
@@ -138,13 +143,14 @@
     if (!note.loaded) $("#notification-loading").hidden = false;
     clearError();
     try {
-      const [settings, rules, channels] = await Promise.all([
-        apiRequest("/settings"), fetchAll("/rules"), fetchAll("/channels"),
+      const [settings, rules, channels, previousBackup] = await Promise.all([
+        apiRequest("/settings"), fetchAll("/rules"), fetchAll("/channels"), apiRequest("/backup/previous"),
       ]);
-      note.settings = settings; note.rules = rules; note.channels = channels; note.loaded = true;
+      note.settings = settings; note.rules = rules; note.channels = channels; note.previousBackup = previousBackup; note.loaded = true;
       setEngineStatus();
       $("#settings-retention-days").value = String(settings.history_retention_days);
       $("#settings-updated-at").textContent = `Guardado ${localDate(settings.updated_at)}`;
+      renderPreviousBackup(previousBackup);
       updateHistoryFilterOptions(); renderRules(); renderChannels();
       if (note.route === "notifications/history") await loadDeliveryHistory();
       $("#notifications-footer-update").textContent = `Actualizado ${localDate(new Date().toISOString())}`;
@@ -285,7 +291,10 @@
     row.append(field, operation, valueWrap, remove);
     const syncValue = (selectedValue) => {
       const boolean = ["hard", "acknowledged", "downtime"].includes(field.value);
-      operation.replaceChildren(...OP_OPTIONS.filter(([key]) => !boolean || ["equals", "not_equals"].includes(key)).map(([value, label]) => { const option = node("option", "", label); option.value = value; return option; }));
+      const options = field.value === "status_information"
+        ? STATUS_INFORMATION_OP_OPTIONS
+        : OP_OPTIONS.filter(([key]) => !boolean || ["equals", "not_equals"].includes(key));
+      operation.replaceChildren(...options.map(([value, label]) => { const option = node("option", "", label); option.value = value; return option; }));
       operation.value = [...operation.options].some((option) => option.value === condition.operator) ? condition.operator : "equals";
       const current = selectedValue !== undefined ? selectedValue : condition.value;
       valueWrap.replaceChildren();
@@ -294,12 +303,12 @@
         for (const [value, label] of [["true", "Sí"], ["false", "No"]]) { const option = node("option", "", label); option.value = value; select.append(option); }
         select.value = String(Boolean(current === true || current === "true")); valueWrap.append(select);
       } else {
-        const input = node("input", "condition-value"); input.type = "text"; input.maxLength = 256; input.placeholder = "Valor de coincidencia"; input.setAttribute("aria-label", "Valor de condición");
+        const input = node("input", "condition-value"); input.type = "text"; input.maxLength = 256; input.placeholder = field.value === "status_information" ? "Texto de Status Information" : "Valor de coincidencia"; input.setAttribute("aria-label", "Valor de condición");
         input.value = String(current ?? ""); valueWrap.append(input);
       }
     };
     syncValue(condition.value);
-    field.addEventListener("change", () => { condition.field = field.value; condition.operator = "equals"; condition.value = ["hard", "acknowledged", "downtime"].includes(field.value) ? false : ""; syncValue(condition.value); });
+    field.addEventListener("change", () => { condition.field = field.value; condition.operator = field.value === "status_information" ? "contains" : "equals"; condition.value = ["hard", "acknowledged", "downtime"].includes(field.value) ? false : ""; syncValue(condition.value); });
     return row;
   }
   function renderConditionList(group = { operator: "AND", conditions: [] }) {
@@ -591,6 +600,110 @@
     } catch (error) { showError(error.message); setEngineStatus(); }
     finally { setBusy(save, false); }
   }
+  async function downloadNotificationBackup(password, buttonElement) {
+    setBusy(buttonElement, true, "Preparando archivo…");
+    try {
+      const response = await fetch(`${API}/backup/export`, {
+        method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" },
+        cache: "no-store", body: JSON.stringify({ password }),
+      });
+      if (!response.ok) {
+        let payload = null;
+        try { payload = await response.json(); } catch { /* use a safe fallback */ }
+        throw new Error(apiErrorMessage(payload, `No se pudo exportar el backup (HTTP ${response.status}).`));
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = /filename="([A-Za-z0-9._-]+)"/.exec(disposition);
+      link.href = objectUrl; link.download = match ? match[1] : "naftamon-notifications-backup.json";
+      document.body.append(link); link.click(); link.remove(); URL.revokeObjectURL(objectUrl);
+      showNotice(password ? "Backup cifrado descargado." : "Backup descargado; no incluye credenciales.");
+    } catch (error) { showError(error instanceof Error ? error.message : "No se pudo exportar la configuración."); }
+    finally { setBusy(buttonElement, false); }
+  }
+  function renderBackupPreview(preview) {
+    const container = $("#notification-backup-preview");
+    container.replaceChildren(); container.hidden = false;
+    container.append(node("strong", "backup-preview-title", "Vista previa válida"));
+    container.append(node("p", "", `${preview.rules} reglas (${preview.enabled_rules} habilitadas) · ${preview.channels} canales (${preview.enabled_channels} habilitados) · motor ${preview.settings.enabled ? "habilitado" : "deshabilitado"} · retención ${preview.settings.history_retention_days} días.`));
+    container.append(node("p", "", preview.encrypted_secrets ? "Credenciales incluidas y cifradas; se volverán a cifrar con la clave de esta instalación." : "El archivo no incluye credenciales."));
+    if (preview.warnings.length) {
+      const list = node("ul", "backup-warning-list");
+      for (const warning of preview.warnings) list.append(node("li", "", warning));
+      container.append(list);
+    } else container.append(node("p", "backup-no-warnings", "Sin advertencias de compatibilidad."));
+    $("#restore-notification-backup").disabled = false;
+  }
+  function renderPreviousBackup(summary) {
+    const container = $("#previous-notification-backup");
+    container.hidden = !summary?.available;
+    if (!summary?.available) return;
+    $("#previous-notification-backup-info").textContent = `${localDate(summary.created_at)} · ${summary.rules} reglas · ${summary.channels} canales${summary.encrypted_secrets ? " · credenciales cifradas con la clave de esta instalación" : ""}.`;
+  }
+  function clearBackupPreview() {
+    note.backupDocument = null; note.backupPreview = null;
+    const preview = $("#notification-backup-preview"); preview.replaceChildren(); preview.hidden = true;
+    $("#restore-notification-backup").disabled = true;
+  }
+  async function previewNotificationBackup() {
+    clearBackupPreview(); clearError();
+    const file = $("#notification-backup-file").files[0];
+    if (!file) { showError("Selecciona un archivo JSON de backup."); return; }
+    if (file.size > 2 * 1024 * 1024) { showError("El archivo supera el límite de 2 MiB."); return; }
+    const buttonElement = $("#preview-notification-backup"); setBusy(buttonElement, true, "Validando…");
+    try {
+      const raw = await file.text();
+      const backup = JSON.parse(raw);
+      if (!backup || typeof backup !== "object" || Array.isArray(backup)) throw new Error("La raíz del archivo debe ser un objeto JSON.");
+      const password = $("#backup-import-password").value || null;
+      const preview = await apiRequest("/backup/preview", { method: "POST", body: { backup, password } });
+      note.backupDocument = backup; note.backupPreview = preview;
+      renderBackupPreview(preview);
+    } catch (error) { showError(error instanceof Error ? error.message : "No se pudo validar el backup."); }
+    finally { setBusy(buttonElement, false); }
+  }
+  async function restoreNotificationBackup() {
+    if (!note.backupDocument || !note.backupPreview) return;
+    const preview = note.backupPreview;
+    openConfirm(
+      "Reemplazar configuración actual",
+      `Se reemplazarán ${preview.rules} reglas, ${preview.channels} canales y las opciones globales de notificaciones. Las entregas pendientes se cancelarán; el historial de entregas y los datos de monitoreo se conservarán. Si falla la operación, SQLite revierte el cambio completo.`,
+      "Reemplazar configuración",
+      async () => {
+        const buttonElement = $("#restore-notification-backup"); setBusy(buttonElement, true, "Restaurando…");
+        try {
+          const result = await apiRequest("/backup/restore", {
+            method: "POST",
+            body: { backup: note.backupDocument, password: $("#backup-import-password").value || null, confirm_replace: true },
+          });
+          clearBackupPreview(); $("#notification-backup-file").value = ""; $("#backup-import-password").value = "";
+          await loadNotifications(true);
+          showNotice(`Configuración restaurada: ${result.rules} reglas y ${result.channels} canales.`);
+        } catch (error) { showError(error instanceof Error ? error.message : "No se pudo restaurar la configuración."); }
+        finally { setBusy(buttonElement, false); buttonElement.disabled = !note.backupDocument || !note.backupPreview; }
+      },
+    );
+  }
+  async function restorePreviousNotificationBackup() {
+    const summary = note.previousBackup;
+    if (!summary?.available) return;
+    openConfirm(
+      "Recuperar configuración anterior",
+      `Se recuperará la copia creada ${localDate(summary.created_at)} con ${summary.rules} reglas y ${summary.channels} canales. La configuración actual se guardará como una nueva copia recuperable antes del cambio.`,
+      "Recuperar copia",
+      async () => {
+        const buttonElement = $("#restore-previous-notification-backup"); setBusy(buttonElement, true, "Recuperando…");
+        try {
+          const result = await apiRequest("/backup/restore-previous", { method: "POST", body: { confirm_replace: true } });
+          await loadNotifications(true);
+          showNotice(`Copia recuperada: ${result.rules} reglas y ${result.channels} canales.`);
+        } catch (error) { showError(error instanceof Error ? error.message : "No se pudo recuperar la copia previa."); }
+        finally { setBusy(buttonElement, false); }
+      },
+    );
+  }
   function openConfirm(title, message, actionLabel, action) {
     $("#confirm-title").textContent = title; $("#confirm-message").textContent = message;
     $("#confirm-accept").textContent = actionLabel; note.confirmAction = action;
@@ -668,6 +781,20 @@
     $("#rule-form").addEventListener("submit", saveRule);
     $("#channel-form").addEventListener("submit", saveChannel);
     $("#notification-settings-form").addEventListener("submit", saveSettings);
+    $("#export-notification-backup").addEventListener("click", (event) => downloadNotificationBackup(null, event.currentTarget));
+    $("#export-encrypted-notification-backup").addEventListener("click", (event) => {
+      const password = $("#backup-export-password").value;
+      if (password.length < 12) { showError("La contraseña de cifrado debe tener al menos 12 caracteres."); return; }
+      if (password !== $("#backup-export-password-confirm").value) { showError("Las contraseñas no coinciden."); return; }
+      downloadNotificationBackup(password, event.currentTarget).finally(() => {
+        $("#backup-export-password").value = ""; $("#backup-export-password-confirm").value = "";
+      });
+    });
+    $("#notification-backup-file").addEventListener("change", clearBackupPreview);
+    $("#backup-import-password").addEventListener("input", clearBackupPreview);
+    $("#preview-notification-backup").addEventListener("click", previewNotificationBackup);
+    $("#restore-notification-backup").addEventListener("click", restoreNotificationBackup);
+    $("#restore-previous-notification-backup").addEventListener("click", restorePreviousNotificationBackup);
     $("#channel-provider").addEventListener("change", setProviderFields);
     $("#add-condition").addEventListener("click", () => {
       const list = $("#rule-condition-list");

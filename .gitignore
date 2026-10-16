@@ -13,3 +13,5 @@ web/data/
 # local AI assistant instructions/settings
 CLAUDE.md
 .claude/
+# Screenshot and console logs
+.playwright-mcp
