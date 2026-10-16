@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
@@ -39,6 +40,9 @@ class Alert(StrictModel):
     last_change: str = Field(max_length=64)
     # model_fields_set distinguishes a legacy omission from an explicit empty value.
     status_information: str = ""
+    # Schema v2 adds a Desktop-visible flag. V1 snapshots remain valid and
+    # retain the historical Web view by defaulting this field to true.
+    visible_in_desktop: StrictBool = True
 
     _check_timestamp = field_validator("last_check", "last_change")(validate_timestamp)
 
@@ -76,14 +80,28 @@ class OkStatus(StrictModel):
         return self
 
 
+class SnapshotCounts(StrictModel):
+    total: int = Field(ge=0)
+    by_state: dict[str, int]
+
+
+class SnapshotSummary(StrictModel):
+    raw: SnapshotCounts
+    visible: SnapshotCounts
+
+
 class Snapshot(StrictModel):
+    schema_version: Literal[1, 2] = 1
     timestamp: str = Field(max_length=64)
     source: Literal["NaftaMon"]
+    source_id: str | None = Field(default=None, min_length=36, max_length=36)
+    snapshot_id: str | None = Field(default=None, min_length=36, max_length=36)
     complete: StrictBool
     servers: list[ServerStatus] = Field(max_length=1000)
     alerts: list[Alert] = Field(max_length=200000)
     # None distinguishes a legacy snapshot from a new authoritative empty list.
     ok_statuses: list[OkStatus] | None = Field(default=None, max_length=200000)
+    summary: SnapshotSummary | None = None
 
     _check_timestamp = field_validator("timestamp")(validate_timestamp)
 
@@ -96,6 +114,29 @@ class Snapshot(StrictModel):
 
     @model_validator(mode="after")
     def validate_snapshot(self) -> "Snapshot":
+        if self.schema_version == 2:
+            if not self.source_id or not self.snapshot_id or self.summary is None:
+                raise ValueError("schema v2 requires source_id, snapshot_id, and summary")
+            try:
+                UUID(self.source_id)
+                UUID(self.snapshot_id)
+            except (ValueError, AttributeError) as exc:
+                raise ValueError("source_id and snapshot_id must be UUIDs") from exc
+            if "ok_statuses" in self.model_fields_set:
+                raise ValueError("schema v2 is alert-only and must not include ok_statuses")
+            if any("visible_in_desktop" not in alert.model_fields_set for alert in self.alerts):
+                raise ValueError("schema v2 alerts require visible_in_desktop")
+            for scope in ("raw", "visible"):
+                counts = getattr(self.summary, scope)
+                if counts.total != (len(self.alerts) if scope == "raw" else sum(a.visible_in_desktop for a in self.alerts)):
+                    raise ValueError(f"summary.{scope}.total does not match alerts")
+                state_counts = {}
+                for alert in self.alerts:
+                    if scope == "visible" and not alert.visible_in_desktop:
+                        continue
+                    state_counts[alert.state] = state_counts.get(alert.state, 0) + 1
+                if counts.by_state != state_counts:
+                    raise ValueError(f"summary.{scope}.by_state does not match alerts")
         server_status = {entry.server: entry.status for entry in self.servers}
         if len(server_status) != len(self.servers):
             raise ValueError("servers must have unique names")

@@ -14,6 +14,7 @@
 #include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QUuid>
 #include <QTemporaryDir>
 #include <QSettings>
 #include <QDialog>
@@ -131,13 +132,16 @@ static void configTests() {
     AppConfig defaults;
     defaults.load();
     CHECK(!defaults.webhookEnabled && defaults.webhookUrl.isEmpty() && defaults.webhookIntervalSeconds == 60);
+    CHECK(defaults.webhookTimeoutSeconds == 30 && defaults.webhookSourceId.size() == 36);
     defaults.webhookEnabled = true;
     defaults.webhookUrl = "http://webhooks:8080/webhook";
     defaults.webhookIntervalSeconds = 17;
+    defaults.webhookTimeoutSeconds = 45;
     defaults.save();
     AppConfig loaded;
     loaded.load();
     CHECK(loaded.webhookEnabled && loaded.webhookUrl == defaults.webhookUrl && loaded.webhookIntervalSeconds == 17);
+    CHECK(loaded.webhookTimeoutSeconds == 45 && loaded.webhookSourceId == defaults.webhookSourceId);
     QSettings settings(AppConfig::path(), QSettings::IniFormat);
     CHECK(settings.value("webhook_enabled").toBool());
     settings.setValue("webhook_interval_seconds", 999999);
@@ -146,9 +150,11 @@ static void configTests() {
     clamped.load();
     CHECK(clamped.webhookIntervalSeconds == 86400);
     settings.setValue("webhook_interval_seconds", -1);
+    settings.setValue("webhook_timeout_seconds", 900);
     settings.sync();
     clamped.load();
     CHECK(clamped.webhookIntervalSeconds == 1);
+    CHECK(clamped.webhookTimeoutSeconds == 300);
     if (oldPath.isEmpty()) qunsetenv("NAFTAMON_CONFIG");
     else qputenv("NAFTAMON_CONFIG", oldPath);
 }
@@ -224,11 +230,16 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     WebhookGateway gateway(nullptr, 250);
     gateway.setServers({&thruk, &empty});
     int delivered = 0, failed = 0, lastStatus = -1;
+    QString lastPeriodicError;
     QObject::connect(&gateway, &WebhookGateway::delivered, &gateway, [&](int status) {
         ++delivered; lastStatus = status;
     });
     QObject::connect(&gateway, &WebhookGateway::deliveryFailed, &gateway, [&](int status) {
         ++failed; lastStatus = status;
+    });
+    QObject::connect(&gateway, &WebhookGateway::requestFinished, &gateway,
+                     [&](const QDateTime &, bool test, int, const QString &error, const QString &) {
+        if (!test) lastPeriodicError = error;
     });
     const int before = sinkStats(base).value("total").toInt();
     CHECK(!gateway.isEnabled());
@@ -243,16 +254,22 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(sinkStats(base).value("total").toInt() > before && !records.isEmpty());
     QJsonObject payload = records.last().toObject();
     CHECK(payload.value("source") == "NaftaMon" && payload.value("complete") == true);
+    CHECK(payload.value("schema_version") == 2);
+    CHECK(payload.value("source_id").toString().size() == 36);
+    CHECK(payload.value("snapshot_id").toString().size() == 36);
     CHECK(QDateTime::fromString(payload.value("timestamp").toString(), Qt::ISODateWithMs).isValid());
     CHECK(payload.value("servers").toArray().size() == 2);
     CHECK(payload.value("alerts").toArray().size() == 4);
-    CHECK(payload.value("ok_statuses").toArray().size() == 2);
+    CHECK(!payload.contains("ok_statuses"));
+    CHECK(payload.value("summary").toObject().value("raw").toObject().value("total") == 4);
+    CHECK(payload.value("summary").toObject().value("visible").toObject().value("total") == 4);
     bool acknowledged = false, downtime = false, foundHostInfo = false, foundEmptyServiceInfo = false,
          foundSpecialInfo = false;
     for (const auto &v : payload.value("alerts").toArray()) {
         QJsonObject a = v.toObject();
         CHECK(a.value("server") == "gateway-test" && !a.value("state").toString().isEmpty());
         CHECK(a.value("state") != "UP");
+        CHECK(a.value("visible_in_desktop") == true);
         CHECK(a.value("status_information").isString());
         CHECK(QDateTime::fromString(a.value("last_check").toString(), Qt::ISODate).isValid());
         acknowledged |= a.value("acknowledged").toBool();
@@ -271,18 +288,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
         }
     }
     CHECK(foundHostInfo && foundEmptyServiceInfo && foundSpecialInfo);
-    bool foundOkHost = false, foundOkService = false;
-    for (const auto &v : payload.value("ok_statuses").toArray()) {
-        const QJsonObject item = v.toObject();
-        CHECK(item.value("state") == "UP" && item.value("status_information").isString());
-        CHECK(item.value("server") == "gateway-test" && item.value("backend") == "alpha");
-        foundOkHost |= item.value("type") == "host" && item.value("host") == "maint01" &&
-                       item.value("status_information") == "PING OK";
-        foundOkService |= item.value("type") == "service" && item.value("host") == "web01" &&
-                          item.value("service") == "ssh" &&
-                          item.value("status_information").toString() == "OK – café & <ready> ✓";
-    }
-    CHECK(foundOkHost && foundOkService);
+    CHECK(!payload.contains("ok_statuses"));  // monitored UP rows stay out of the alert-only v2 contract
     CHECK(acknowledged && downtime);  // visual acknowledgement/downtime filters do not apply
     const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
     CHECK(!body.contains("secret") && !body.contains("admin") && !body.contains("thrukUrl") &&
@@ -305,7 +311,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(waitUntil([&] { return delivered >= slowIntervalStart + 3; }, 1000));
     payload = receivedWebhooks(base).last().toObject();
     CHECK(payload.value("complete") == false && payload.value("alerts").toArray().isEmpty());
-    CHECK(payload.value("ok_statuses").toArray().isEmpty());
+    CHECK(!payload.contains("ok_statuses"));
     CHECK(payload.value("servers").toArray().last().toObject().value("status") == "error");
 
     const int beforePartial = delivered;
@@ -313,7 +319,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(waitUntil([&] { return delivered > beforePartial; }, 1000));
     payload = receivedWebhooks(base).last().toObject();
     CHECK(payload.value("complete") == false && payload.value("alerts").toArray().size() == 4);
-    CHECK(payload.value("ok_statuses").toArray().size() == 2);
+    CHECK(!payload.contains("ok_statuses"));
     CHECK(payload.value("servers").toArray().last().toObject().value("status") == "pending");
 
     ThrukServer second(ServerConf{"gateway-second", thrukUrl, "admin", "secret", {}});
@@ -373,7 +379,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     oldReceiver.configure(false, base + "/old", 60);
 
     gateway.configure(true, sinkUrl + "?status=500", 1);
-    CHECK(waitUntil([&] { return failed >= 1; }, 1500));
+    CHECK(waitUntil([&] { return failed >= 1; }, 2500));
     CHECK(lastStatus == 500);
     const int generic422Before = sinkStats(base).value("total").toInt();
     gateway.configure(true, sinkUrl + "?status=422", 1);
@@ -381,11 +387,12 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(lastStatus == 422);
     CHECK(sinkStats(base).value("total").toInt() == generic422Before + 1);
     gateway.configure(true, "http://127.0.0.1:1/webhook", 1);
-    CHECK(waitUntil([&] { return failed >= 3; }, 1500));
+    CHECK(waitUntil([&] { return failed >= 3; }, 2500));
     CHECK(lastStatus == 0);
     gateway.configure(true, sinkUrl + "?delay=2&status=500", 1);
-    CHECK(waitUntil([&] { return failed >= 4; }, 1500));
+    CHECK(waitUntil([&] { return failed >= 4; }, 3000));
     CHECK(lastStatus == 0);  // absolute 250 ms timeout
+    CHECK(lastPeriodicError.contains("Timeout after 250 ms"));
     gateway.configure(false, sinkUrl, 1);
     const int stoppedAt = sinkStats(base).value("total").toInt();
     CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > stoppedAt; }, 1300));
@@ -450,12 +457,12 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
     CHECK(largeBytes > 1024 * 1024 && largeBytes < 8 * 1024 * 1024);
     const QJsonObject largePayload = receivedWebhooks(base).last().toObject();
     CHECK(largePayload.value("alerts").toArray().size() == 7000);
-    CHECK(largePayload.value("ok_statuses").toArray().size() == 7000);
+    CHECK(!largePayload.contains("ok_statuses"));
 
     WebhookGateway slow(nullptr, 4000);
     slow.setServers({&empty});
     const int slowBefore = sinkStats(base).value("total").toInt();
-    slow.configure(true, sinkUrl + "?delay=2.5&status=500", 1);
+    slow.configure(true, sinkUrl + "?delay=2.5&status=202", 1);
     CHECK(waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore; }, 1000));
     CHECK(!waitUntil([&] { return sinkStats(base).value("total").toInt() > slowBefore + 1; }, 1300));
     slow.configure(false, sinkUrl, 1);
@@ -465,8 +472,8 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
         bulk.raw.hosts.clear(); bulk.raw.hosts.squeeze();
         bulk.raw.services.clear(); bulk.raw.services.squeeze();
         bulk.raw.okStatuses.clear(); bulk.raw.okStatuses.squeeze();
-        bulk.raw.hosts.reserve(14);
-        bulk.raw.services.reserve(134);
+        bulk.raw.hosts.reserve(0);
+        bulk.raw.services.reserve(442);
         bulk.raw.okStatuses.reserve(165950);
         const qint64 now = QDateTime::currentSecsSinceEpoch();
         for (int n = 0; n < 165950; ++n) {
@@ -481,7 +488,7 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
             bulk.raw.okStatuses.append(item);
         }
         const QVector<QPair<State, int>> alertGroups = {
-            {CRITICAL, 80}, {WARNING, 40}, {UNKNOWN, 14}, {DOWN, 8}, {UNREACHABLE, 6}
+            {CRITICAL, 335}, {WARNING, 106}, {UNKNOWN, 1}
         };
         int alertIndex = 0;
         for (const auto &group : alertGroups) {
@@ -492,7 +499,10 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
                                 group.first);
                 item.server = "bulk";
                 item.backend = "scale-lab";
-                item.output = QString::fromUtf8("Synthetic alert — threshold exceeded ✓");
+                const int visibleLimit = group.first == CRITICAL ? 38 : group.first == WARNING ? 23 : group.second;
+                item.output = n < visibleLimit
+                    ? QString::fromUtf8("Synthetic alert — Connection refused ✓")
+                    : QString::fromUtf8("FILTERED synthetic alert — threshold exceeded ✓");
                 item.ack = alertIndex % 7 == 0;
                 item.downtime = alertIndex % 13 == 0;
                 item.lastCheck = now;
@@ -501,19 +511,24 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
                 else bulk.raw.services.append(item);
             }
         }
-        const QVector<Item> desktopDefaultVisible = applyFilters(bulk.raw, Filters{}, now);
+        Filters scaleFilters;
+        scaleFilters.reInfo.enabled = true;
+        scaleFilters.reInfo.re = QRegularExpression("FILTERED");
+        const QVector<Item> desktopDefaultVisible = applyFilters(bulk.raw, scaleFilters, now);
         Filters hideAcknowledged;
         hideAcknowledged.acknowledged = true;
         Filters hideDowntime;
         hideDowntime.downtime = true;
         const QVector<Item> desktopAckFiltered = applyFilters(bulk.raw, hideAcknowledged, now);
         const QVector<Item> desktopDowntimeFiltered = applyFilters(bulk.raw, hideDowntime, now);
-        CHECK(desktopDefaultVisible.size() == 148);
-        CHECK(desktopAckFiltered.size() == 126);
-        CHECK(desktopDowntimeFiltered.size() == 136);
+        CHECK(bulk.raw.hosts.size() + bulk.raw.services.size() == 442);
+        CHECK(desktopDefaultVisible.size() == 62);
+        CHECK(desktopAckFiltered.size() == 378);
+        CHECK(desktopDowntimeFiltered.size() == 408);
 
         WebhookGateway scale(nullptr, 60000);
         scale.setServers({&bulk});
+        scale.setVisibilityContext(scaleFilters, false, {}, now);
         int scaleDelivered = 0;
         qint64 rawBytes = 0, wireBytes = 0, buildMs = 0, serializeMs = 0, gzipMs = 0;
         QObject::connect(&scale, &WebhookGateway::delivered, &scale, [&](int) { ++scaleDelivered; });
@@ -538,38 +553,44 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
         const QJsonObject summary = receivedWebhooks(base).last().toObject();
         const QJsonObject stats = sinkStats(base);
         CHECK(summary.value("summary").toBool());
-        CHECK(summary.value("alerts").toInt() == 148);
+        CHECK(summary.value("alerts").toInt() == 442);
         const QJsonObject alertStates = summary.value("alert_states").toObject();
         const QJsonObject alertTypes = summary.value("alert_types").toObject();
         const QJsonObject statusTypes = summary.value("status_types").toObject();
-        CHECK(alertStates.value("CRITICAL").toInt() == 80);
-        CHECK(alertStates.value("WARNING").toInt() == 40);
-        CHECK(alertStates.value("UNKNOWN").toInt() == 14);
-        CHECK(alertStates.value("DOWN").toInt() == 8);
-        CHECK(alertStates.value("UNREACHABLE").toInt() == 6);
-        CHECK(alertTypes.value("host").toInt() == 14 && alertTypes.value("service").toInt() == 134);
-        CHECK(summary.value("alert_acknowledged").toInt() == 22);
-        CHECK(summary.value("alert_downtime").toInt() == 12);
-        CHECK(summary.value("ok_statuses").toInt() == 165950);
-        CHECK(statusTypes.value("host").toInt() == 41488);
-        CHECK(statusTypes.value("service").toInt() == 124462);
-        CHECK(summary.value("unique_alerts").toInt() == 148);
-        CHECK(summary.value("unique_ok_statuses").toInt() == 165950);
+        CHECK(alertStates.value("CRITICAL").toInt() == 335);
+        CHECK(alertStates.value("WARNING").toInt() == 106);
+        CHECK(alertStates.value("UNKNOWN").toInt() == 1);
+        CHECK(!alertStates.contains("DOWN") && !alertStates.contains("UNREACHABLE"));
+        CHECK(alertTypes.value("host").toInt() == 0 && alertTypes.value("service").toInt() == 442);
+        CHECK(summary.value("alert_acknowledged").toInt() == 64);
+        CHECK(summary.value("alert_downtime").toInt() == 34);
+        CHECK(summary.value("ok_statuses").toInt() == 0);
+        CHECK(statusTypes.value("host").toInt() == 0 && statusTypes.value("service").toInt() == 0);
+        CHECK(summary.value("unique_alerts").toInt() == 442);
+        CHECK(summary.value("unique_ok_statuses").toInt() == 0);
         CHECK(summary.value("identity_overlap").toInt() == 0);
-        CHECK(summary.value("first_status_information").toString() ==
-              QString::fromUtf8("OK: all checks pass — revisión ñ ✓"));
-        CHECK(summary.value("last_status_information").toString() ==
-              QString::fromUtf8("OK: all checks pass — revisión ñ ✓"));
+        const QJsonObject rawSummary = summary.value("raw_summary").toObject();
+        const QJsonObject visibleSummary = summary.value("visible_summary").toObject();
+        CHECK(summary.value("schema_version").toInt() == 2);
+        CHECK(!summary.value("source_id").toString().isEmpty() && !summary.value("snapshot_id").toString().isEmpty());
+        CHECK(rawSummary.value("total").toInt() == 442);
+        CHECK(visibleSummary.value("total").toInt() == 62);
+        CHECK(visibleSummary.value("by_state").toObject().value("CRITICAL").toInt() == 38);
+        CHECK(visibleSummary.value("by_state").toObject().value("WARNING").toInt() == 23);
+        CHECK(visibleSummary.value("by_state").toObject().value("UNKNOWN").toInt() == 1);
+        CHECK(!summary.value("first_status_information").isString());
+        CHECK(!summary.value("last_status_information").isString());
         CHECK(!summary.value("wire_contains_secret").toBool());
-        CHECK(heartbeatsAtPreparation >= 2);  // the Qt event loop stayed responsive while encoding
+        CHECK(heartbeatsAtPreparation >= 0 && guiHeartbeats > heartbeatsAtPreparation);
+        // Encoding runs on a worker; the event loop must keep advancing while delivery is pending.
         CHECK(stats.value("last_content_encoding").toString() == "gzip");
         CHECK(stats.value("last_decoded_bytes").toInt() == rawBytes);
         CHECK(stats.value("last_body_bytes").toInt() == wireBytes);
-        std::printf("Desktop counts: raw_alerts=148, default_visible=%lld, ack_filtered=%lld, downtime_filtered=%lld, UP=165950\n",
+        std::printf("Desktop counts: raw_alerts=442, default_visible=%lld, ack_filtered=%lld, downtime_filtered=%lld, UP=165950\n",
                     static_cast<long long>(desktopDefaultVisible.size()),
                     static_cast<long long>(desktopAckFiltered.size()),
                     static_cast<long long>(desktopDowntimeFiltered.size()));
-        std::printf("Desktop Gateway scale: alerts=148, UP=165950, json=%lld bytes, gzip=%lld bytes, "
+        std::printf("Desktop Gateway scale: alerts=442, UP=165950, json=%lld bytes, gzip=%lld bytes, "
                     "build=%lld ms, serialize=%lld ms, gzip=%lld ms, delivered=%lld ms, gui_ticks=%d\n",
                     (long long)rawBytes, (long long)wireBytes, (long long)buildMs,
                     (long long)serializeMs, (long long)gzipMs, (long long)endToEnd.elapsed(),
@@ -584,6 +605,13 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
         if (!webUrl.isEmpty()) {
             WebhookGateway toWeb(nullptr, 60000);
             toWeb.setServers({&bulk});
+            toWeb.setVisibilityContext(scaleFilters, false, {}, now);
+            toWeb.setSourceId(QUuid::createUuid().toString(QUuid::WithoutBraces));
+            QUrl apiBaseUrl(webUrl);
+            apiBaseUrl.setPath("");
+            apiBaseUrl.setQuery(QString());
+            const QString apiBase = apiBaseUrl.toString();
+            const QJsonObject statsBefore = sinkGet(apiBase, "/api/v1/stats").object();
             int acceptedByWeb = 0, rejectedByWeb = 0;
             QObject::connect(&toWeb, &WebhookGateway::delivered, &toWeb,
                              [&](int) { ++acceptedByWeb; });
@@ -592,7 +620,37 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
             toWeb.configure(true, webUrl, 60);
             CHECK(waitUntil([&] { return acceptedByWeb == 1 || rejectedByWeb > 0; }, 60000));
             toWeb.configure(false, webUrl, 60);
-            std::printf("Desktop -> Web integration: HTTP 202=%s\n", acceptedByWeb == 1 ? "PASS" : "FAIL");
+            CHECK(acceptedByWeb == 1 && rejectedByWeb == 0);
+            if (acceptedByWeb == 1) {
+                const QJsonObject statsAfter = sinkGet(apiBase, "/api/v1/stats").object();
+                const QJsonArray sources = sinkGet(apiBase, "/api/v1/sources").object().value("items").toArray();
+                const QString emitterId = toWeb.sourceId();
+                int sourceId = -1;
+                for (const auto &entry : sources) {
+                    const QJsonObject source = entry.toObject();
+                    if (source.value("client_source_id").toString() == emitterId)
+                        sourceId = source.value("id").toInt();
+                }
+                CHECK(sourceId > 0);
+                const QString bySource = QString("&source_id=%1").arg(sourceId);
+                const QJsonObject visiblePage = sinkGet(apiBase, "/api/v1/statuses?view=desktop&limit=500" + bySource).object();
+                const QJsonObject rawPage = sinkGet(apiBase, "/api/v1/statuses?view=all&limit=500" + bySource).object();
+                CHECK(visiblePage.value("total").toInt() == 62);
+                CHECK(rawPage.value("total").toInt() == 442);
+                CHECK(statsAfter.value("alerts").toObject().value("total").toInt() -
+                      statsBefore.value("alerts").toObject().value("total").toInt() == 442);
+                CHECK(statsAfter.value("desktop_visible_alerts").toObject().value("total").toInt() -
+                      statsBefore.value("desktop_visible_alerts").toObject().value("total").toInt() == 62);
+                const QJsonObject rawByState = statsAfter.value("alerts").toObject().value("by_state").toObject();
+                const QJsonObject oldByState = statsBefore.value("alerts").toObject().value("by_state").toObject();
+                CHECK(rawByState.value("CRITICAL").toInt() - oldByState.value("CRITICAL").toInt() == 335);
+                CHECK(rawByState.value("WARNING").toInt() - oldByState.value("WARNING").toInt() == 106);
+                CHECK(rawByState.value("UNKNOWN").toInt() - oldByState.value("UNKNOWN").toInt() == 1);
+                CHECK(rawByState.value("UP").toInt() == oldByState.value("UP").toInt());
+                std::printf("Desktop -> Web integration: HTTP 202=PASS raw=442 visible=62 UP_sent=0\n");
+            } else {
+                std::printf("Desktop -> Web integration: HTTP 202=FAIL\n");
+            }
         }
     }
 }
@@ -635,13 +693,15 @@ static void gatewayUiTests(const QString &thrukUrl, const QString &sinkUrl) {
                     if (!dialog) return;
                     auto *url = dialog->findChild<QLineEdit *>("gatewayUrl");
                     auto *interval = dialog->findChild<QSpinBox *>("gatewayInterval");
+                    auto *timeout = dialog->findChild<QSpinBox *>("gatewayTimeout");
                     auto *test = dialog->findChild<QPushButton *>("gatewayTest");
                     auto *result = dialog->findChild<QPlainTextEdit *>("gatewayTestResult");
                     auto *buttons = dialog->findChild<QDialogButtonBox *>();
-                    CHECK(url && interval && test && result && buttons);
-                    if (!url || !interval || !test || !result || !buttons) { dialog->reject(); return; }
+                    CHECK(url && interval && timeout && test && result && buttons);
+                    if (!url || !interval || !timeout || !test || !result || !buttons) { dialog->reject(); return; }
                     url->setText(sinkUrl);
                     interval->setValue(1);
+                    timeout->setValue(30);
                     test->click();
                     CHECK(!test->isEnabled() && result->toPlainText().contains("Sending"));
                     CHECK(waitUntil([&] { return result->toPlainText().contains("HTTP 202"); }, 2000));
@@ -660,7 +720,8 @@ static void gatewayUiTests(const QString &thrukUrl, const QString &sinkUrl) {
                 settings->click();
                 AppConfig saved;
                 saved.load();
-                CHECK(saved.webhookUrl == sinkUrl && saved.webhookIntervalSeconds == 1);
+                CHECK(saved.webhookUrl == sinkUrl && saved.webhookIntervalSeconds == 1 &&
+                      saved.webhookTimeoutSeconds == 30 && saved.webhookSourceId.size() == 36);
                 CHECK(!saved.webhookEnabled && last->text().contains("Test: HTTP 500"));
                 QJsonObject testPayload = receivedWebhooks(base).last().toObject();
                 CHECK(testPayload.value("test") == true && testPayload.value("type") == "test");

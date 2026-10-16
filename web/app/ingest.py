@@ -11,6 +11,10 @@ from .models import Alert, OkStatus, Snapshot
 from .notifications.events import record_transition
 
 
+class SnapshotIdConflict(ValueError):
+    """A sender reused a stable snapshot ID for different content."""
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -67,9 +71,13 @@ def _snapshot_content_hash(
     fields: dict[str, Any] = {
         "alerts": snapshot.alerts,
         "complete": snapshot.complete,
+        "schema_version": snapshot.schema_version,
         "servers": snapshot.servers,
         "source": snapshot.source,
     }
+    if snapshot.schema_version == 2:
+        fields["source_id"] = snapshot.source_id
+        fields["summary"] = snapshot.summary.model_dump(mode="json") if snapshot.summary else None
     if "ok_statuses" in snapshot.model_fields_set or streamed_ok_statuses_present:
         fields["ok_statuses"] = snapshot.ok_statuses
     digest = hashlib.sha256()
@@ -130,15 +138,15 @@ def reconcile_server(
                    (source_id, server, backend, host, service, type, state, hard,
                     acknowledged, downtime, last_check, last_change, first_seen_at, last_seen_at,
                     episode_id, notification_revision, status_information, status_information_available,
-                    search_text, host_search, service_search)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    search_text, host_search, service_search, visible_in_desktop)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     source_id, alert.server, alert.backend, alert.host, alert.service, alert.type,
                     alert.state, int(alert.hard), int(alert.acknowledged), int(alert.downtime),
                     alert.last_check, alert.last_change, received_at, received_at, episode_id, revision,
                     alert.status_information,
                     int("status_information" in alert.model_fields_set),
-                    search_text, host_search, service_search,
+                    search_text, host_search, service_search, int(alert.visible_in_desktop),
                 ),
             )
             db.execute(
@@ -192,12 +200,14 @@ def reconcile_server(
                last_check = ?, last_change = ?, last_seen_at = ?, notification_revision = ?,
                status_information = COALESCE(?, status_information),
                status_information_available = COALESCE(?, status_information_available),
+               visible_in_desktop = COALESCE(?, visible_in_desktop),
                search_text = ?, host_search = ?, service_search = ? WHERE id = ?""",
             (
                 alert.state, int(alert.hard), int(alert.acknowledged), int(alert.downtime),
                 alert.last_check, alert.last_change, received_at, revision,
                 alert.status_information if "status_information" in alert.model_fields_set else None,
                 1 if "status_information" in alert.model_fields_set else None,
+                int(alert.visible_in_desktop) if "visible_in_desktop" in alert.model_fields_set else None,
                 search_text, host_search, service_search,
                 previous["id"],
             ),
@@ -365,16 +375,46 @@ def accept_snapshot(
         # also prevents two first-time requests from racing the unique source key.
         db.execute("BEGIN IMMEDIATE")
         received_at = iso_utc()
-        row = db.execute(
-            "SELECT id, snapshot_revision, payload_timestamp, deleted_at FROM sources WHERE source_name = ? AND peer_ip = ?",
-            (snapshot.source, peer_ip),
-        ).fetchone()
+        if snapshot.schema_version == 2:
+            row = db.execute("SELECT * FROM sources WHERE client_source_id = ?", (snapshot.source_id,)).fetchone()
+            if row is None:
+                # Preserve existing alert and notification history when this
+                # installation upgrades from a legacy, address-based sender.
+                row = db.execute(
+                    "SELECT * FROM sources WHERE source_name = ? AND peer_ip = ? AND client_source_id IS NULL",
+                    (snapshot.source, peer_ip),
+                ).fetchone()
+                if row is not None:
+                    db.execute("UPDATE sources SET client_source_id = ? WHERE id = ?", (snapshot.source_id, row["id"]))
+        else:
+            row = db.execute(
+                "SELECT * FROM sources WHERE source_name = ? AND peer_ip = ? AND client_source_id IS NULL",
+                (snapshot.source, peer_ip),
+            ).fetchone()
+
+        if row is not None and snapshot.schema_version == 2:
+            receipt = db.execute(
+                "SELECT content_hash, payload_timestamp FROM snapshot_receipts WHERE source_id = ? AND snapshot_id = ?",
+                (row["id"], snapshot.snapshot_id),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["content_hash"] != content_hash or receipt["payload_timestamp"] != snapshot.timestamp:
+                    raise SnapshotIdConflict("snapshot_id was already used for different content")
+                db.execute("UPDATE sources SET last_received_at = ? WHERE id = ?", (received_at, row["id"]))
+                return {
+                    "kind": "snapshot", "source_id": row["id"], "source": snapshot.source,
+                    "received_at": received_at, "complete": snapshot.complete,
+                    "content_hash": content_hash, "snapshot_id": snapshot.snapshot_id,
+                    "duplicate_snapshot": True, "stale_snapshot": False,
+                }
         if row is None:
             cursor = db.execute(
                 """INSERT INTO sources
-                   (source_name, peer_ip, first_received_at, last_received_at, payload_timestamp, complete, snapshot_revision)
-                   VALUES (?, ?, ?, ?, ?, ?, 1)""",
-                (snapshot.source, peer_ip, received_at, received_at, snapshot.timestamp, int(snapshot.complete)),
+                   (source_name, peer_ip, first_received_at, last_received_at, payload_timestamp, complete,
+                    snapshot_revision, client_source_id, contract_version)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (snapshot.source, peer_ip, received_at, received_at, snapshot.timestamp, int(snapshot.complete),
+                 snapshot.source_id, snapshot.schema_version),
             )
             source_id = cursor.lastrowid
             source_revision = 1
@@ -386,9 +426,11 @@ def accept_snapshot(
                 source_revision = 1
                 db.execute(
                     """UPDATE sources SET first_received_at = ?, last_received_at = ?,
-                       payload_timestamp = ?, complete = ?, snapshot_revision = ?, deleted_at = NULL
+                       payload_timestamp = ?, complete = ?, snapshot_revision = ?, deleted_at = NULL,
+                       client_source_id = COALESCE(?, client_source_id), contract_version = ?
                        WHERE id = ?""",
-                    (received_at, received_at, snapshot.timestamp, int(snapshot.complete), source_revision, source_id),
+                    (received_at, received_at, snapshot.timestamp, int(snapshot.complete), source_revision,
+                     snapshot.source_id, snapshot.schema_version, source_id),
                 )
             elif _payload_is_older(snapshot.timestamp, row["payload_timestamp"]):
                 # A delayed webhook must not roll back the latest snapshot or any
@@ -397,27 +439,52 @@ def accept_snapshot(
                 return {
                     "kind": "snapshot", "source_id": source_id, "source": snapshot.source,
                     "received_at": received_at, "complete": snapshot.complete,
-                    "content_hash": content_hash, "stale_snapshot": True,
+                    "content_hash": content_hash, "snapshot_id": snapshot.snapshot_id,
+                    "duplicate_snapshot": False, "stale_snapshot": True,
                 }
             else:
                 source_revision = row["snapshot_revision"] + 1
                 db.execute(
                     """UPDATE sources SET last_received_at = ?, payload_timestamp = ?, complete = ?,
-                       snapshot_revision = ? WHERE id = ?""",
-                    (received_at, snapshot.timestamp, int(snapshot.complete), source_revision, source_id),
+                       snapshot_revision = ?, client_source_id = COALESCE(?, client_source_id),
+                       contract_version = MAX(contract_version, ?) WHERE id = ?""",
+                    (received_at, snapshot.timestamp, int(snapshot.complete), source_revision,
+                     snapshot.source_id, snapshot.schema_version, source_id),
                 )
+
+        if snapshot.schema_version == 2 and row is not None and row["contract_version"] < 2:
+            # Old versions stored 165k UP rows separately. They are monitoring
+            # data, not alerts: remove them without transitions or notifications.
+            db.execute("DELETE FROM monitored_statuses WHERE source_id = ?", (source_id,))
 
         db.execute(
             """INSERT INTO latest_snapshots
                (source_id, payload_json, content_hash, payload_timestamp, received_at, complete,
-                payload_gzip, payload_encoding)
-               VALUES (?, '{}', ?, ?, ?, ?, ?, 'gzip-json')
+                payload_gzip, payload_encoding, snapshot_id, summary_json)
+               VALUES (?, '{}', ?, ?, ?, ?, ?, 'gzip-json', ?, ?)
                ON CONFLICT(source_id) DO UPDATE SET payload_json = '{}',
                  content_hash = excluded.content_hash, payload_timestamp = excluded.payload_timestamp,
                  received_at = excluded.received_at, complete = excluded.complete,
-                 payload_gzip = excluded.payload_gzip, payload_encoding = excluded.payload_encoding""",
-            (source_id, content_hash, snapshot.timestamp, received_at, int(snapshot.complete), payload_gzip),
+                 payload_gzip = excluded.payload_gzip, payload_encoding = excluded.payload_encoding,
+                 snapshot_id = excluded.snapshot_id, summary_json = excluded.summary_json""",
+            (source_id, content_hash, snapshot.timestamp, received_at, int(snapshot.complete), payload_gzip,
+             snapshot.snapshot_id, json.dumps(
+                 snapshot.summary.model_dump(mode="json") if snapshot.summary else {},
+                 sort_keys=True, separators=(",", ":"))),
         )
+        if snapshot.schema_version == 2:
+            db.execute(
+                "INSERT INTO snapshot_receipts(source_id, snapshot_id, content_hash, payload_timestamp, received_at) VALUES (?, ?, ?, ?, ?)",
+                (source_id, snapshot.snapshot_id, content_hash, snapshot.timestamp, received_at),
+            )
+            old_receipts = db.execute(
+                "SELECT snapshot_id FROM snapshot_receipts WHERE source_id = ? ORDER BY received_at DESC LIMIT -1 OFFSET 256",
+                (source_id,),
+            ).fetchall()
+            db.executemany(
+                "DELETE FROM snapshot_receipts WHERE source_id = ? AND snapshot_id = ?",
+                ((source_id, old["snapshot_id"]) for old in old_receipts),
+            )
         db.execute("UPDATE app_state SET value = value + 1 WHERE key = 'monitoring_revision'")
 
         seen_servers = set()
@@ -490,5 +557,7 @@ def accept_snapshot(
         "received_at": received_at,
         "complete": snapshot.complete,
         "content_hash": content_hash,
+        "snapshot_id": snapshot.snapshot_id,
+        "duplicate_snapshot": False,
         "stale_snapshot": False,
     }

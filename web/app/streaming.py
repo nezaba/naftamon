@@ -12,7 +12,10 @@ from .models import OkStatus, Snapshot
 
 STREAMING_SNAPSHOT_THRESHOLD_BYTES = 1024 * 1024
 MAX_OK_STATUSES = 200_000
-_ROOT_FIELDS = {"timestamp", "source", "complete", "servers", "alerts", "ok_statuses"}
+_ROOT_FIELDS = {
+    "schema_version", "timestamp", "source", "source_id", "snapshot_id",
+    "complete", "servers", "alerts", "ok_statuses", "summary",
+}
 
 
 class SnapshotStreamValidationError(ValueError):
