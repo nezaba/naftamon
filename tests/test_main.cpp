@@ -565,8 +565,10 @@ static void webhookTests(const QString &thrukUrl, const QString &sinkUrl) {
         CHECK(stats.value("last_content_encoding").toString() == "gzip");
         CHECK(stats.value("last_decoded_bytes").toInt() == rawBytes);
         CHECK(stats.value("last_body_bytes").toInt() == wireBytes);
-        std::printf("Desktop counts: raw_alerts=148, default_visible=%d, ack_filtered=%d, downtime_filtered=%d, UP=165950\n",
-                    desktopDefaultVisible.size(), desktopAckFiltered.size(), desktopDowntimeFiltered.size());
+        std::printf("Desktop counts: raw_alerts=148, default_visible=%lld, ack_filtered=%lld, downtime_filtered=%lld, UP=165950\n",
+                    static_cast<long long>(desktopDefaultVisible.size()),
+                    static_cast<long long>(desktopAckFiltered.size()),
+                    static_cast<long long>(desktopDowntimeFiltered.size()));
         std::printf("Desktop Gateway scale: alerts=148, UP=165950, json=%lld bytes, gzip=%lld bytes, "
                     "build=%lld ms, serialize=%lld ms, gzip=%lld ms, delivered=%lld ms, gui_ticks=%d\n",
                     (long long)rawBytes, (long long)wireBytes, (long long)buildMs,
